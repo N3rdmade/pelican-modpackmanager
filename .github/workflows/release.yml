@@ -1,14 +1,8 @@
 name: Build & Release
 
 on:
-  push:
-    tags:
-      - 'v*'          # e.g. v1.0.1 — pushing a tag cuts a release
-  workflow_dispatch:   # …or run it manually from the Actions tab
-    inputs:
-      tag:
-        description: 'Release tag (e.g. v1.0.1). Leave blank to use plugin.json version.'
-        required: false
+  push:                # every push — version in plugin.json drives the tag
+  workflow_dispatch:    # …or run it manually from the Actions tab
 
 permissions:
   contents: write       # needed to create releases / upload assets
@@ -20,19 +14,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Determine version
+      - name: Read version from plugin.json
         id: ver
         run: |
-          if [ -n "${GITHUB_REF#refs/tags/}" ] && [ "${GITHUB_REF}" != "${GITHUB_REF#refs/tags/}" ]; then
-            TAG="${GITHUB_REF#refs/tags/}"
-          elif [ -n "${{ github.event.inputs.tag }}" ]; then
-            TAG="${{ github.event.inputs.tag }}"
-          else
-            VERSION="$(grep -oE '"version"[[:space:]]*:[[:space:]]*"[^"]+"' plugin.json | grep -oE '[0-9][^"]*')"
-            TAG="v${VERSION}"
+          VERSION="$(grep -oE '"version"[[:space:]]*:[[:space:]]*"[^"]+"' plugin.json | grep -oE '[0-9][^"]*')"
+          if [ -z "$VERSION" ]; then
+            echo "::error::Could not read version from plugin.json"
+            exit 1
           fi
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "Releasing as: ${TAG}"
+          echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Releasing as: v${VERSION}"
 
       - name: Build plugin zip
         run: |
