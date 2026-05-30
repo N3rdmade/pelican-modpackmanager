@@ -134,6 +134,12 @@
     .mpm-pack__stats { display:flex; flex-wrap:wrap; align-items:center; gap:12px; margin-top:9px; font-size:.72rem; color:var(--mpm-muted); }
     .mpm-pack__stats span { display:inline-flex; align-items:center; gap:4px; }
     .mpm-pack__stats svg { width:13px; height:13px; }
+    .mpm-loaders { display:flex; flex-wrap:wrap; gap:6px; margin-top:9px; }
+    .mpm-loader { display:inline-flex; align-items:center; gap:4px; font-size:.66rem; font-weight:700;
+        letter-spacing:.02em; text-transform:uppercase; padding:2px 8px; border-radius:6px;
+        border:1px solid color-mix(in srgb, var(--mpm-loader-c) 45%, transparent);
+        color:var(--mpm-loader-c); background:color-mix(in srgb, var(--mpm-loader-c) 14%, transparent); }
+    .mpm-loader::before { content:""; width:6px; height:6px; border-radius:50%; background:var(--mpm-loader-c); }
     .mpm-pack__desc { font-size:.8rem; color:var(--mpm-text-2); line-height:1.5; margin:0;
         display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
     .mpm-pack__foot { margin-top:auto; padding-top:4px; }
@@ -536,6 +542,23 @@
                                         </span>
                                     @endif
                                 </div>
+                                @if(!empty($pack['loaders']))
+                                    <div class="mpm-loaders">
+                                        @foreach($pack['loaders'] as $loader)
+                                            @php
+                                                $lc = match(strtolower($loader)) {
+                                                    'forge'      => '#d97706',
+                                                    'neoforge'   => '#f97316',
+                                                    'fabric'     => '#c9a16b',
+                                                    'quilt'      => '#a855f7',
+                                                    'liteloader' => '#38bdf8',
+                                                    default      => '#94a3b8',
+                                                };
+                                            @endphp
+                                            <span class="mpm-loader" style="--mpm-loader-c:{{ $lc }};">{{ $loader }}</span>
+                                        @endforeach
+                                    </div>
+                                @endif
                             </div>
                         </div>
                         <p class="mpm-pack__desc">{{ $pack['summary'] }}</p>

@@ -252,7 +252,30 @@ class CurseForgeService
             'author'        => $mod['authors'][0]['name'] ?? 'Unknown',
             'dateModified'  => $mod['dateModified'] ?? null,
             'gameVersions'  => $mod['latestFilesIndexes'][0]['gameVersion'] ?? null,
+            'loaders'       => $this->extractLoaders($mod['latestFilesIndexes'] ?? []),
             'latestFileId'  => $mod['mainFileId'] ?? null,
         ];
+    }
+
+    /**
+     * Collect the distinct mod loaders a pack supports from its latestFilesIndexes.
+     * CurseForge encodes the loader as an integer in each index's `modLoader`.
+     *
+     * @return string[] e.g. ['NeoForge'] or ['Forge', 'Fabric']
+     */
+    private function extractLoaders(array $indexes): array
+    {
+        // CurseForge modLoaderType enum.
+        static $map = [1 => 'Forge', 3 => 'LiteLoader', 4 => 'Fabric', 5 => 'Quilt', 6 => 'NeoForge'];
+
+        $loaders = [];
+        foreach ($indexes as $idx) {
+            $name = $map[$idx['modLoader'] ?? 0] ?? null;
+            if ($name !== null) {
+                $loaders[$name] = true;
+            }
+        }
+
+        return array_keys($loaders);
     }
 }

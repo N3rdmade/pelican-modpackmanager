@@ -127,6 +127,8 @@ class ModrinthService
             'author'        => $hit['author'] ?? 'Unknown',
             'dateModified'  => $hit['date_modified'] ?? null,
             'gameVersions'  => implode(', ', array_slice($hit['versions'] ?? [], 0, 3)),
+            // Search hits fold loaders into `categories` alongside content tags.
+            'loaders'       => $this->extractLoaders($hit['categories'] ?? []),
             'latestFileId'  => null,
         ];
     }
@@ -144,7 +146,36 @@ class ModrinthService
             'author'        => $project['team'] ?? 'Unknown',
             'dateModified'  => $project['updated'] ?? null,
             'gameVersions'  => null,
+            // Projects expose a dedicated `loaders` array; fall back to categories.
+            'loaders'       => $this->extractLoaders($project['loaders'] ?? $project['categories'] ?? []),
             'latestFileId'  => null,
         ];
+    }
+
+    /**
+     * Filter a Modrinth tag list down to the mod loaders and present them as
+     * display names (e.g. 'neoforge' → 'NeoForge').
+     *
+     * @return string[]
+     */
+    private function extractLoaders(array $tags): array
+    {
+        static $map = [
+            'forge'       => 'Forge',
+            'neoforge'    => 'NeoForge',
+            'fabric'      => 'Fabric',
+            'quilt'       => 'Quilt',
+            'liteloader'  => 'LiteLoader',
+        ];
+
+        $loaders = [];
+        foreach ($tags as $tag) {
+            $key = strtolower((string) $tag);
+            if (isset($map[$key])) {
+                $loaders[$map[$key]] = true;
+            }
+        }
+
+        return array_keys($loaders);
     }
 }
