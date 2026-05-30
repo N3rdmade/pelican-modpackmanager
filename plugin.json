@@ -1,0 +1,13 @@
+{
+    "id": "modpack-manager",
+    "name": "Modpack Manager",
+    "author": "cosmii02",
+    "version": "1.0.0",
+    "description": "Browse, install, and update Minecraft modpacks from CurseForge and Modrinth directly from the server panel.",
+    "category": "plugin",
+    "namespace": "Cosmii02\\ModpackManager",
+    "class": "ModpackManagerPlugin",
+    "panels": ["admin", "server"],
+    "panel_version": null,
+    "composer_packages": {}
+}
