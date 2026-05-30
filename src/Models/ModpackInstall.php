@@ -21,6 +21,10 @@ use App\Models\Server;
  * @property int         $progress         0–100
  * @property array       $debug_log        Array of debug messages
  * @property string|null $error_message
+ * @property string|null $latest_version           Latest version label seen by the update checker
+ * @property bool        $update_available         Whether a newer version is available
+ * @property \Illuminate\Support\Carbon|null $update_checked_at  When updates were last checked
+ * @property string|null $update_notified_version  Version we last notified about
  */
 class ModpackInstall extends Model
 {
@@ -38,12 +42,18 @@ class ModpackInstall extends Model
         'progress',
         'debug_log',
         'error_message',
+        'latest_version',
+        'update_available',
+        'update_checked_at',
+        'update_notified_version',
     ];
 
     protected $casts = [
-        'steps'     => 'array',
-        'debug_log' => 'array',
-        'progress'  => 'integer',
+        'steps'             => 'array',
+        'debug_log'         => 'array',
+        'progress'          => 'integer',
+        'update_available'  => 'boolean',
+        'update_checked_at' => 'datetime',
     ];
 
     // ─── Step definitions ─────────────────────────────────────────────────────

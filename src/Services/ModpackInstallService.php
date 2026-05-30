@@ -810,16 +810,28 @@ class ModpackInstallService
 
         $infos = $cf->getFilesByIds(array_map(fn ($f) => (int) $f['fileID'], $manifest['files']));
 
-        $expected = [];
+        // Resolve each project's type so resource packs / shaders / data packs go to
+        // their own folder instead of all landing in /mods.
+        $classes = [];
+        try {
+            $classes = $cf->getModClasses(array_map(fn ($f) => (int) ($f['projectID'] ?? 0), $manifest['files']));
+        } catch (Throwable $e) {
+            $record->appendLog('  NOTE: could not resolve project types (' . $e->getMessage() . ') — placing everything in /mods.');
+        }
+
+        $expected    = [];
+        $createdDirs  = ['/mods' => true];
+        $folderCounts = [];
         foreach ($manifest['files'] as $f) {
             $fid  = (int) ($f['fileID'] ?? 0);
+            $pid  = (int) ($f['projectID'] ?? 0);
             $info = $infos[$fid] ?? null;
             $url  = $info['url'] ?? null;
             $name = $info['name'] ?? null;
 
             if (empty($url)) {
                 try {
-                    $url  = $cf->getDownloadUrl((int) ($f['projectID'] ?? 0), $fid);
+                    $url  = $cf->getDownloadUrl($pid, $fid);
                     $name = $name ?: ('mod-' . $fid . '.jar');
                 } catch (Throwable $e) {
                     $record->appendLog("  WARN: skipping file #{$fid} (" . $e->getMessage() . ')');
@@ -827,12 +839,22 @@ class ModpackInstallService
                 }
             }
 
-            $name = $name ?: ('mod-' . $fid . '.jar');
-            $this->fileRepo->pull($url, '/mods', ['filename' => $name, 'foreground' => false]);
-            $expected[] = ['dir' => '/mods', 'name' => $name];
+            $name      = $name ?: ('mod-' . $fid . '.jar');
+            $folder    = $this->folderForCurseClass($classes[$pid] ?? null);
+            $remoteDir = '/' . $folder;
+
+            if (!isset($createdDirs[$remoteDir])) {
+                try { $this->fileRepo->createDirectory($folder, '/'); } catch (Throwable) {}
+                $createdDirs[$remoteDir] = true;
+            }
+
+            $this->fileRepo->pull($url, $remoteDir, ['filename' => $name, 'foreground' => false]);
+            $expected[] = ['dir' => $remoteDir, 'name' => $name];
+            $folderCounts[$folder] = ($folderCounts[$folder] ?? 0) + 1;
         }
 
-        $record->appendLog('  Queued ' . count($expected) . ' mod downloads on Wings…');
+        $breakdown = implode(', ', array_map(fn ($d, $n) => "{$n} → {$d}/", array_keys($folderCounts), $folderCounts));
+        $record->appendLog('  Queued ' . count($expected) . ' downloads on Wings' . ($breakdown ? " ({$breakdown})" : '') . '…');
         $this->waitForFiles($record, $expected);
 
         $note = "Assembled from a CurseForge CLIENT pack by Modpack Manager.\n"
@@ -890,6 +912,23 @@ class ModpackInstallService
               . "and reinstall so the loader server is installed automatically. If that\n"
               . "step is skipped (no matching egg), set your loader per the dependencies above.\n";
         try { $this->fileRepo->putContent('/modpack-manager-README.txt', $note); } catch (Throwable) {}
+    }
+
+    /**
+     * Map a CurseForge class (project type) ID to the server folder its files belong in.
+     * Unknown/mod types fall back to mods/.
+     *
+     * CurseForge Minecraft class IDs:
+     *   6 = Mc Mods · 12 = Resource Packs · 6552 = Shaders · 6945 = Data Packs · 6541 = Customization
+     */
+    private function folderForCurseClass(?int $classId): string
+    {
+        return match ($classId) {
+            12   => 'resourcepacks',
+            6552 => 'shaderpacks',
+            6945 => 'datapacks',
+            default => 'mods',
+        };
     }
 
     /**

@@ -168,6 +168,41 @@ class CurseForgeService
     }
 
     /**
+     * Resolve the CurseForge class (project type) for many projects at once,
+     * so the installer can route each downloaded file to the right folder
+     * (mods / resourcepacks / shaderpacks / …) instead of dumping all in /mods.
+     *
+     * @param int[] $modIds
+     * @return array<int, int>  classId keyed by modId (e.g. 6 = Mc Mods, 12 = Resource Packs)
+     */
+    public function getModClasses(array $modIds): array
+    {
+        $out = [];
+
+        foreach (array_chunk(array_values(array_unique(array_map('intval', $modIds))), 100) as $chunk) {
+            if (empty($chunk)) {
+                continue;
+            }
+
+            $response = $this->client->post('/mods', ['modIds' => $chunk]);
+
+            if ($response->failed()) {
+                Log::warning('[ModpackManager] CurseForge /mods batch failed', ['status' => $response->status()]);
+                continue;
+            }
+
+            foreach ($response->json('data', []) as $mod) {
+                $id = (int) ($mod['id'] ?? 0);
+                if ($id && isset($mod['classId'])) {
+                    $out[$id] = (int) $mod['classId'];
+                }
+            }
+        }
+
+        return $out;
+    }
+
+    /**
      * Get the download URL for a specific file.
      */
     public function getDownloadUrl(int $modId, int $fileId): string

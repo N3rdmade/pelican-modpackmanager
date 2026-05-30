@@ -2,6 +2,7 @@
 
 namespace Cosmii02\ModpackManager\Filament\Server\Pages;
 
+use App\Enums\SubuserPermission;
 use App\Models\Server;
 use Cosmii02\ModpackManager\Jobs\InstallModpackJob;
 use Cosmii02\ModpackManager\Models\ModpackInstall;
@@ -26,6 +27,14 @@ class ModpackBrowserPage extends Page
      * (15 min) + download waits so a slow-but-live install is never killed.
      */
     private const STALE_AFTER_SECONDS = 1200; // 20 minutes
+
+    /**
+     * Subuser permission required to view this page and install/update modpacks.
+     * Installing replaces files, switches the egg and reinstalls the server, so
+     * "reinstall" is the matching authority. The server owner and admins always
+     * pass. Change this one line to loosen/tighten the gate.
+     */
+    private const MANAGE_PERMISSION = SubuserPermission::SettingsReinstall;
 
     protected static string|\BackedEnum|null $navigationIcon = 'heroicon-o-archive-box-arrow-down';
     protected static ?string $navigationLabel = 'Modpacks';
@@ -66,11 +75,40 @@ class ModpackBrowserPage extends Page
     public bool    $updateAvailable    = false;
     public ?string $latestVersionLabel = null;
 
+    // Whether the current user may install/update (drives the UI; enforced server-side too).
+    public bool $canManage = false;
+
+    // ─── Authorization ──────────────────────────────────────────────────────────
+
+    /**
+     * Hide the page (and its nav entry) from users without the manage permission.
+     */
+    public static function canAccess(): bool
+    {
+        return parent::canAccess()
+            && user()?->can(self::MANAGE_PERMISSION, Filament::getTenant());
+    }
+
+    private function userCanManage(): bool
+    {
+        return (bool) user()?->can(self::MANAGE_PERMISSION, $this->getServer());
+    }
+
+    /**
+     * Server-side guard for every state-changing action. Never trust the UI.
+     */
+    private function authorizeManage(): void
+    {
+        abort_unless($this->userCanManage(), 403);
+    }
+
     // ─── Lifecycle ────────────────────────────────────────────────────────────
 
     public function mount(): void
     {
         $server = $this->getServer();
+
+        $this->canManage = $this->userCanManage();
 
         // Check for any existing installation record
         $latest = ModpackInstall::where('server_id', $server->id)
@@ -142,6 +180,8 @@ class ModpackBrowserPage extends Page
      */
     public function openModal(string|int $modpackId): void
     {
+        $this->authorizeManage();
+
         $modpack = collect($this->modpacks)->firstWhere('id', $modpackId);
 
         if (!$modpack) {
@@ -211,6 +251,8 @@ class ModpackBrowserPage extends Page
      */
     public function startInstall(): void
     {
+        $this->authorizeManage();
+
         if (!$this->selectedModpack || !$this->selectedVersion) {
             Notification::make()->title('Please select a version.')->warning()->send();
             return;

@@ -69,7 +69,11 @@ would otherwise time out on large packs). The archive is always saved as
 2. If no server pack exists, the installer **builds one** from the client pack:
    it reads `manifest.json`, batch-resolves every mod's download URL
    (`POST /mods/files`, with a forgecdn fallback for null URLs), and has Wings
-   `pull()` each mod into `/mods`, then merges `overrides/`.
+   `pull()` each file, then merges `overrides/`. Files are **routed by project
+   type** — the installer batch-fetches each project's `classId` (`POST /mods`)
+   and sends resource packs → `resourcepacks/`, shaders → `shaderpacks/`, data
+   packs → `datapacks/`, and everything else (mods + unknown) → `mods/`
+   (`folderForCurseClass()`). If the type lookup fails it falls back to `/mods`.
 
 **Modrinth:** a `.mrpack` only contains `modrinth.index.json` + `overrides/`,
 so the installer always parses the index and downloads each file whose
@@ -130,9 +134,45 @@ step is wrapped so it can never fail the install.
 Very large packs (hundreds of mods) can take several minutes; the download
 wait loop polls Wings and stops early if progress stalls.
 
+## Scheduled update checks
+
+A scheduled task checks every server's installed modpack against its provider
+for a newer version and notifies the **server owner** (panel bell) the first
+time a new version appears.
+
+- **Command:** `php artisan modpack-manager:check-updates`
+  (`--no-notify` records the result without notifying — handy for testing).
+- **Schedule:** registered via `callAfterResolving(Schedule::class, …)` in
+  `ModpackManagerServiceProvider`, driven by the panel's existing
+  `php artisan schedule:run` cron entry. Frequency comes from
+  `config('modpack-manager.update_check_frequency')` (`hourly`,
+  `every_six_hours`, `twice_daily`, `daily` (default), `weekly`). Disable
+  entirely with `MODPACK_MANAGER_UPDATE_CHECKS=false`.
+- **Logic (`UpdateCheckService`):** picks the newest `installed` record per
+  server, resolves the latest version label using the *same* CurseForge/Modrinth
+  calls as the in-panel banner, and compares it to the stored `modpack_version`.
+  Results persist on `modpack_installs` (`latest_version`, `update_available`,
+  `update_checked_at`). It notifies **once per version** — `update_notified_version`
+  records the version last announced so repeated runs don't re-spam the owner.
+- A provider error returns `null` (no false "update available").
+
+## Permission gate
+
+The Modpacks page is gated on a Pelican subuser permission so it isn't exposed
+to every server user. Installing a modpack replaces files, switches the egg and
+reinstalls the server, so the page requires **`settings.reinstall`**
+(`SubuserPermission::SettingsReinstall`) — the server owner and admins always pass.
+
+- **`canAccess()`** hides the page *and its nav entry* from users without the
+  permission (`parent::canAccess() && user()?->can(self::MANAGE_PERMISSION, tenant)`).
+- **Server-side**, `startInstall()` and `openModal()` call `authorizeManage()`
+  (`abort_unless(..., 403)`) so the action can't be hit directly even if the UI
+  is bypassed. `$canManage` is also exposed for the view.
+- The required permission is the single constant `MANAGE_PERMISSION` at the top
+  of `ModpackBrowserPage` — change that one line to loosen/tighten the gate.
+
 ## Future Work
 
-- [ ] Detect file project type so client-pack resourcepacks/shaders go to the right folder (not `mods/`)
-- [ ] Subuser permission gate (currently accessible to all server users)
-- [ ] Scheduled update checks with notifications
-- [ ] Backup download/restore UI
+- [x] Detect file project type so client-pack resourcepacks/shaders go to the right folder (not `mods/`) TO BE TESTED/but even then this will be done later when I do proper non server-pack modpack testing
+- [x] Subuser permission gate (currently accessible to all server users) TO BE TESTED
+- [x] Scheduled update checks with notifications TO BE TESTED
