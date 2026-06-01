@@ -4,8 +4,8 @@
 
 1. Copy this folder to `/var/www/pelican/plugins/modpack-manager/`
 2. Run: `php artisan p:plugin:install modpack-manager`
-3. Run migrations: `php artisan migrate`
-4. Configure API keys: Admin Panel → Plugins → Modpack Manager Settings
+   (or click **Install** in Admin Panel → Plugins — both run migrations automatically)
+3. Configure API keys: Admin Panel → Plugins → Modpack Manager Settings
 
 ## Requirements
 
@@ -78,6 +78,22 @@ would otherwise time out on large packs). The archive is always saved as
 **Modrinth:** a `.mrpack` only contains `modrinth.index.json` + `overrides/`,
 so the installer always parses the index and downloads each file whose
 `env.server` is not `unsupported` to its declared `path`, then merges overrides.
+
+**FTB (modpacks.ch):** keyless. There is no archive — the version endpoint
+(`/public/modpack/{pack}/{version}`) returns a file list. The installer skips
+the download/extract steps and pulls each non-`clientonly` file to its declared
+`path`. ~80% of files carry a direct FTB-hosted `url`; the rest only have a
+CurseForge `{project,file}` reference, which is resolved in one batch via
+`CurseForgeService` (so a complete FTB install needs the CurseForge API key —
+without it those files are skipped). Loader / Minecraft / **Java** version come
+straight from the version's `targets` array.
+
+**ATLauncher:** keyless (the API needs a browser User-Agent to clear Cloudflare).
+The install manifest is the CDN `Configs.json`; every mod jar is re-hosted on
+ATLauncher's CDN, so even CurseForge-sourced mods download **without** the CF
+key. The installer pulls each `server`-side, non-`library`, `download != browser`
+mod to `mods/`, then downloads + extracts the pack's `Configs.zip` bundle.
+Loader (type + version), Minecraft and Java (`java.min`) come from the manifest.
 
 ### Startup / loader auto-configuration (`stepConfigureLoader`)
 
@@ -171,8 +187,3 @@ reinstalls the server, so the page requires **`settings.reinstall`**
 - The required permission is the single constant `MANAGE_PERMISSION` at the top
   of `ModpackBrowserPage` — change that one line to loosen/tighten the gate.
 
-## Future Work
-
-- [x] Detect file project type so client-pack resourcepacks/shaders go to the right folder (not `mods/`) TO BE TESTED/but even then this will be done later when I do proper non server-pack modpack testing
-- [x] Subuser permission gate (currently accessible to all server users) TO BE TESTED
-- [x] Scheduled update checks with notifications TO BE TESTED

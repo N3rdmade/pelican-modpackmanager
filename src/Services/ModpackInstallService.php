@@ -61,8 +61,14 @@ class ModpackInstallService
 
             $plan = $this->resolvePlan($record, $spec);
 
-            $this->stepDownload($record, $plan['archiveUrl']);
-            $this->stepExtract($record);
+            if (!empty($plan['archiveUrl'])) {
+                $this->stepDownload($record, $plan['archiveUrl']);
+                $this->stepExtract($record);
+            } else {
+                // FTB/ATLauncher ship a file list, not a single archive.
+                $this->skipArchiveSteps($record);
+            }
+
             $this->stepRestoreConfig($record);
             $this->stepAssembleAndMerge($record, $plan, $spec);
             $this->stepFinalize($record);
@@ -90,8 +96,10 @@ class ModpackInstallService
     /**
      * Decide what to download and how to install it.
      *
-     * @return array{mode:string, archiveUrl:string}
-     *   mode: 'server_pack' | 'curseforge_build' | 'modrinth'
+     * @return array{mode:string, archiveUrl:?string}
+     *   mode: 'server_pack' | 'curseforge_build' | 'modrinth' | 'ftb' | 'atlauncher'.
+     *   FTB/ATLauncher carry no archive — they ship a file list + loader metadata
+     *   that the assemble step downloads directly.
      */
     private function resolvePlan(ModpackInstall $record, array $spec): array
     {
@@ -102,6 +110,37 @@ class ModpackInstallService
             }
             $record->appendLog('Modrinth pack — will download server-side files from the index.');
             return ['mode' => 'modrinth', 'archiveUrl' => $url];
+        }
+
+        if ($spec['provider'] === 'ftb') {
+            $detail = app(FtbService::class)->getVersionFiles((int) $spec['pack_id'], (int) $spec['version_id']);
+            $record->appendLog('FTB pack — assembling ' . count($detail['files']) . ' server files from the API.');
+
+            return [
+                'mode'       => 'ftb',
+                'archiveUrl' => null,
+                'files'      => $detail['files'],
+                'loader'     => $detail['loader'],
+                'mc'         => $detail['mc'],
+                'version'    => $detail['loaderVersion'],
+                'java'       => $detail['java'],
+            ];
+        }
+
+        if ($spec['provider'] === 'atlauncher') {
+            $manifest = app(ATLauncherService::class)->getInstallManifest((string) $spec['safe_name'], (string) $spec['version']);
+            $record->appendLog('ATLauncher pack — assembling ' . count($manifest['files']) . ' server mods from the CDN manifest.');
+
+            return [
+                'mode'       => 'atlauncher',
+                'archiveUrl' => null,
+                'files'      => $manifest['files'],
+                'configsUrl' => $manifest['configsUrl'],
+                'loader'     => $manifest['loader'],
+                'mc'         => $manifest['mc'],
+                'version'    => $manifest['loaderVersion'],
+                'java'       => $manifest['java'],
+            ];
         }
 
         /** @var CurseForgeService $cf */
@@ -289,6 +328,22 @@ class ModpackInstallService
         $record->markStepDone('extract');
     }
 
+    /**
+     * FTB/ATLauncher have no single archive — files are pulled individually in
+     * the assemble step — so the download/extract steps are marked done up front.
+     */
+    private function skipArchiveSteps(ModpackInstall $record): void
+    {
+        $record->markStepRunning('download');
+        $record->appendLog('This provider has no single archive — files are fetched individually during assembly.');
+        $record->update(['progress' => 48]);
+        $record->markStepDone('download');
+
+        $record->markStepRunning('extract');
+        $record->update(['progress' => 58]);
+        $record->markStepDone('extract');
+    }
+
     private function stepRestoreConfig(ModpackInstall $record): void
     {
         $record->markStepRunning('restore_config');
@@ -323,6 +378,10 @@ class ModpackInstallService
             $this->assembleCurseForgeBuild($record, app(CurseForgeService::class));
         } elseif ($plan['mode'] === 'modrinth') {
             $this->assembleModrinth($record);
+        } elseif ($plan['mode'] === 'ftb') {
+            $this->assembleFtb($record, $plan);
+        } elseif ($plan['mode'] === 'atlauncher') {
+            $this->assembleATLauncher($record, $plan);
         } else {
             $record->appendLog('Server pack installed — no assembly required.');
         }
@@ -506,10 +565,12 @@ class ModpackInstallService
         }
 
         $server = $server->refresh();
-        $image  = $this->pickJavaImageForVersion($server, $this->javaForMc($mc));
+        // FTB/ATLauncher report an exact Java version; otherwise infer from the MC version.
+        $java   = $plan['java'] ?? $this->javaForMc($mc);
+        $image  = $this->pickJavaImageForVersion($server, $java);
         if ($image) {
             $server->update(['image' => $image]);
-            $record->appendLog("  Set Java image: {$image}.");
+            $record->appendLog("  Set Java image: {$image} (Java {$java}).");
         }
 
         try {
@@ -715,6 +776,16 @@ class ModpackInstallService
     {
         $loader = $mc = $version = null;
 
+        // FTB/ATLauncher loader metadata comes from the provider API (carried in the plan),
+        // not from a manifest written to disk.
+        if (in_array($plan['mode'], ['ftb', 'atlauncher'], true)) {
+            return [
+                'loader'  => $plan['loader'] ?? null,
+                'mc'      => $plan['mc'] ?? null,
+                'version' => $plan['version'] ?? null,
+            ];
+        }
+
         try {
             if ($plan['mode'] === 'modrinth') {
                 $index = json_decode((string) $this->fileRepo->getContent('/modrinth.index.json', 5 * 1024 * 1024), true);
@@ -911,6 +982,142 @@ class ModpackInstallService
               . "Modpack Manager will try to switch this server to a matching loader egg\n"
               . "and reinstall so the loader server is installed automatically. If that\n"
               . "step is skipped (no matching egg), set your loader per the dependencies above.\n";
+        try { $this->fileRepo->putContent('/modpack-manager-README.txt', $note); } catch (Throwable) {}
+    }
+
+    /**
+     * FTB: download each server-side file from its FTB-hosted URL. Files that only
+     * carry a CurseForge {project,file} reference are resolved in one batch via
+     * CurseForgeService (needs the CF key); if that's unavailable they're skipped.
+     */
+    private function assembleFtb(ModpackInstall $record, array $plan): void
+    {
+        $files = $plan['files'] ?? [];
+        if (empty($files)) {
+            throw new RuntimeException('FTB returned no installable files for this version.');
+        }
+
+        // Batch-resolve the CurseForge-referenced files (no direct URL).
+        $cfFileIds = [];
+        foreach ($files as $f) {
+            if (empty($f['url']) && !empty($f['cfFile'])) {
+                $cfFileIds[] = (int) $f['cfFile'];
+            }
+        }
+
+        $cfInfos = [];
+        if (!empty($cfFileIds)) {
+            try {
+                $cfInfos = app(CurseForgeService::class)->getFilesByIds($cfFileIds);
+            } catch (Throwable $e) {
+                $record->appendLog('  NOTE: ' . count($cfFileIds) . ' file(s) are CurseForge-hosted and need the CurseForge API key — they will be skipped (' . $e->getMessage() . ').');
+            }
+        }
+
+        $expected   = [];
+        $createdDirs = [];
+        $skipped    = 0;
+        foreach ($files as $f) {
+            $name = $f['name'];
+            $url  = $f['url'] ?? null;
+
+            if (empty($url) && !empty($f['cfFile'])) {
+                $url = $cfInfos[(int) $f['cfFile']]['url'] ?? null;
+                if (empty($url) && !empty($f['cfProject'])) {
+                    try {
+                        $url = app(CurseForgeService::class)->getDownloadUrl((int) $f['cfProject'], (int) $f['cfFile']);
+                    } catch (Throwable) {
+                        $url = null;
+                    }
+                }
+            }
+
+            if (empty($url)) {
+                $skipped++;
+                continue;
+            }
+
+            $dir       = trim((string) ($f['dir'] ?? ''), '/');
+            $remoteDir = $dir === '' ? '/' : '/' . $dir;
+
+            if ($remoteDir !== '/' && !isset($createdDirs[$remoteDir])) {
+                try { $this->fileRepo->createDirectory($dir, '/'); } catch (Throwable) {}
+                $createdDirs[$remoteDir] = true;
+            }
+
+            $this->fileRepo->pull($url, $remoteDir, ['filename' => $name, 'foreground' => false]);
+            $expected[] = ['dir' => $remoteDir, 'name' => $name];
+        }
+
+        $record->appendLog('  Queued ' . count($expected) . ' file downloads on Wings…' . ($skipped ? " ({$skipped} skipped — no resolvable URL)" : ''));
+        $this->waitForFiles($record, $expected);
+
+        $note = "Installed from an FTB (modpacks.ch) pack by Modpack Manager.\n"
+              . 'Minecraft: ' . ($plan['mc'] ?? 'unknown') . ' / loader: ' . ($plan['loader'] ?? 'unknown') . ' ' . ($plan['version'] ?? '') . "\n\n"
+              . "Modpack Manager will try to switch this server to a matching loader egg and reinstall.\n";
+        try { $this->fileRepo->putContent('/modpack-manager-README.txt', $note); } catch (Throwable) {}
+    }
+
+    /**
+     * ATLauncher: every server mod is re-hosted on ATLauncher's CDN, so pull each
+     * one directly (no CurseForge key needed), then download + extract the pack's
+     * config zip if it has one.
+     */
+    private function assembleATLauncher(ModpackInstall $record, array $plan): void
+    {
+        $files = $plan['files'] ?? [];
+        if (empty($files)) {
+            throw new RuntimeException('ATLauncher returned no installable server mods for this version.');
+        }
+
+        try { $this->fileRepo->createDirectory('mods', '/'); } catch (Throwable) {}
+
+        $expected = [];
+        foreach ($files as $f) {
+            $remoteDir = '/' . trim((string) ($f['dir'] ?? 'mods'), '/');
+            $this->fileRepo->pull($f['url'], $remoteDir, ['filename' => $f['name'], 'foreground' => false]);
+            $expected[] = ['dir' => $remoteDir, 'name' => $f['name']];
+        }
+
+        $record->appendLog('  Queued ' . count($expected) . ' mod downloads on Wings…');
+        $this->waitForFiles($record, $expected);
+
+        if (!empty($plan['configsUrl'])) {
+            $record->appendLog('  Downloading the pack config bundle…');
+            $this->fileRepo->pull($plan['configsUrl'], '/', ['filename' => self::ARCHIVE_NAME, 'foreground' => false]);
+
+            $deadline = time() + 300;
+            $last = -1;
+            $stable = 0;
+            while (time() < $deadline) {
+                sleep(4);
+                $size = $this->remoteFileSize('/', self::ARCHIVE_NAME);
+                if ($size === null) {
+                    continue;
+                }
+                if ($size > 0 && $size === $last) {
+                    if (++$stable >= 2) {
+                        break;
+                    }
+                } else {
+                    $stable = 0;
+                }
+                $last = $size;
+            }
+
+            if ($last > 0) {
+                try {
+                    $this->fileRepo->decompressFile('/', self::ARCHIVE_NAME);
+                    $record->appendLog('  Extracted the config bundle.');
+                } catch (Throwable $e) {
+                    $record->appendLog('  WARNING: could not extract config bundle (' . $e->getMessage() . ').');
+                }
+            }
+        }
+
+        $note = "Installed from an ATLauncher pack by Modpack Manager.\n"
+              . 'Minecraft: ' . ($plan['mc'] ?? 'unknown') . ' / loader: ' . ($plan['loader'] ?? 'unknown') . ' ' . ($plan['version'] ?? '') . "\n\n"
+              . "Modpack Manager will try to switch this server to a matching loader egg and reinstall.\n";
         try { $this->fileRepo->putContent('/modpack-manager-README.txt', $note); } catch (Throwable) {}
     }
 

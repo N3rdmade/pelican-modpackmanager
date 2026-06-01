@@ -97,8 +97,16 @@ class UpdateCheckService
                 return $files[0]['displayName'] ?? null;
             }
 
-            $versions = app(ModrinthService::class)->getVersions($record->modpack_id);
-            return $versions[0]['versionNumber'] ?? $versions[0]['name'] ?? null;
+            $versions = match ($record->provider) {
+                'ftb'        => app(FtbService::class)->getVersions((string) $record->modpack_id),
+                'atlauncher' => app(ATLauncherService::class)->getVersions((string) $record->modpack_id),
+                default      => app(ModrinthService::class)->getVersions((string) $record->modpack_id),
+            };
+
+            return $versions[0]['displayName']
+                ?? $versions[0]['versionNumber']
+                ?? $versions[0]['name']
+                ?? null;
         } catch (Throwable) {
             // Be conservative: a provider hiccup must not produce a false "update".
             return null;

@@ -6,7 +6,9 @@ use App\Enums\SubuserPermission;
 use App\Models\Server;
 use Cosmii02\ModpackManager\Jobs\InstallModpackJob;
 use Cosmii02\ModpackManager\Models\ModpackInstall;
+use Cosmii02\ModpackManager\Services\ATLauncherService;
 use Cosmii02\ModpackManager\Services\CurseForgeService;
+use Cosmii02\ModpackManager\Services\FtbService;
 use Cosmii02\ModpackManager\Services\ModrinthService;
 use Filament\Facades\Filament;
 use Filament\Notifications\Notification;
@@ -45,7 +47,15 @@ class ModpackBrowserPage extends Page
     // ─── State ────────────────────────────────────────────────────────────────
 
     public string $search    = '';
-    public string $provider  = 'curseforge';   // 'curseforge' | 'modrinth'
+    public string $provider  = 'all';   // 'all' | 'curseforge' | 'modrinth' | 'ftb' | 'atlauncher'
+
+    /**
+     * Providers queried by the combined "all" view. FTB (per-result detail
+     * fan-out) and ATLauncher (large list fetch) are intentionally excluded
+     * here because they slow the homepage down — they remain fully available
+     * via their own provider tabs.
+     */
+    private const COMBINED_PROVIDERS = ['curseforge', 'modrinth'];
     public array  $modpacks  = [];
     public bool   $isLoading = false;
     public string $errorMsg  = '';
@@ -178,16 +188,21 @@ class ModpackBrowserPage extends Page
     /**
      * Open install/update modal for a given modpack.
      */
-    public function openModal(string|int $modpackId): void
+    public function openModal(string|int $modpackId, ?string $provider = null): void
     {
         $this->authorizeManage();
 
-        $modpack = collect($this->modpacks)->firstWhere('id', $modpackId);
+        // In the combined "all" view, numeric IDs can collide across providers
+        // (e.g. CurseForge vs FTB), so match on provider too when it's supplied.
+        $modpack = collect($this->modpacks)->first(
+            fn ($m) => (string) ($m['id'] ?? '') === (string) $modpackId
+                && ($provider === null || ($m['provider'] ?? null) === $provider)
+        );
 
         if (!$modpack) {
             // Fetch from API if not in current list (e.g., installed pack not in search results)
             try {
-                $modpack = $this->fetchSingleModpack($modpackId);
+                $modpack = $this->fetchSingleModpack($modpackId, $provider ?? $this->provider);
             } catch (Throwable $e) {
                 Notification::make()->title('Could not load modpack details.')->danger()->send();
                 return;
@@ -202,7 +217,10 @@ class ModpackBrowserPage extends Page
         $this->createBackup     = true;
         $this->showModal        = true;
 
-        $this->loadVersions();
+        // Don't block opening the modal on the version fetch — the modal pops up
+        // instantly with its loading state, and the version list is fetched in a
+        // follow-up request via wire:init="loadVersions" in the Blade view. The
+        // newest version (versions[0]) is auto-selected the moment it lands.
     }
 
     public function closeModal(): void
@@ -225,13 +243,15 @@ class ModpackBrowserPage extends Page
         $this->versionsLoading = true;
 
         try {
-            if ($this->selectedModpack['provider'] === 'curseforge') {
-                $service = app(CurseForgeService::class);
-                $this->versions = $service->getFiles((int) $this->selectedModpack['id']);
-            } else {
-                $service = app(ModrinthService::class);
-                $this->versions = $service->getVersions($this->selectedModpack['id']);
-            }
+            $id = $this->selectedModpack['id'];
+
+            $this->versions = match ($this->selectedModpack['provider']) {
+                'curseforge' => app(CurseForgeService::class)->getFiles((int) $id),
+                'modrinth'   => app(ModrinthService::class)->getVersions((string) $id),
+                'ftb'        => app(FtbService::class)->getVersions((string) $id),
+                'atlauncher' => app(ATLauncherService::class)->getVersions((string) $id),
+                default      => [],
+            };
 
             if (!empty($this->versions)) {
                 $this->selectedVersion = (string) $this->versions[0]['id'];
@@ -261,16 +281,18 @@ class ModpackBrowserPage extends Page
         $server   = $this->getServer();
         $provider = $this->selectedModpack['provider'];
 
-        // Build an install "spec" the job uses to resolve the server pack
-        // (or build one from the client pack). For Modrinth we resolve the
-        // .mrpack URL here since the versions list is already loaded.
+        // Build an install "spec" the job uses to resolve the files to install.
+        // CurseForge resolves the server pack (or builds from the client pack);
+        // Modrinth resolves the .mrpack URL here (versions are already loaded);
+        // FTB and ATLauncher only need identifiers — the job pulls their file
+        // lists from the provider API.
         if ($provider === 'curseforge') {
             $spec = [
                 'provider' => 'curseforge',
                 'mod_id'   => (int) $this->selectedModpack['id'],
                 'file_id'  => (int) $this->selectedVersion,
             ];
-        } else {
+        } elseif ($provider === 'modrinth') {
             $version = collect($this->versions)->firstWhere('id', $this->selectedVersion);
             $mrpackUrl = $version ? app(ModrinthService::class)->getPrimaryFileUrl($version['files']) : null;
 
@@ -284,6 +306,18 @@ class ModpackBrowserPage extends Page
                 'project_id' => (string) $this->selectedModpack['id'],
                 'version_id' => (string) $this->selectedVersion,
                 'mrpack_url' => $mrpackUrl,
+            ];
+        } elseif ($provider === 'ftb') {
+            $spec = [
+                'provider'   => 'ftb',
+                'pack_id'    => (int) $this->selectedModpack['id'],
+                'version_id' => (int) $this->selectedVersion,
+            ];
+        } else {
+            $spec = [
+                'provider'  => 'atlauncher',
+                'safe_name' => (string) $this->selectedModpack['id'],
+                'version'   => (string) $this->selectedVersion,
             ];
         }
 
@@ -499,8 +533,15 @@ class ModpackBrowserPage extends Page
                 $files = app(CurseForgeService::class)->getFiles((int) $record->modpack_id);
                 $latestLabel = $files[0]['displayName'] ?? null;
             } else {
-                $versions = app(ModrinthService::class)->getVersions($record->modpack_id);
-                $latestLabel = $versions[0]['versionNumber'] ?? $versions[0]['name'] ?? null;
+                $versions = match ($record->provider) {
+                    'ftb'        => app(FtbService::class)->getVersions((string) $record->modpack_id),
+                    'atlauncher' => app(ATLauncherService::class)->getVersions((string) $record->modpack_id),
+                    default      => app(ModrinthService::class)->getVersions((string) $record->modpack_id),
+                };
+                $latestLabel = $versions[0]['displayName']
+                    ?? $versions[0]['versionNumber']
+                    ?? $versions[0]['name']
+                    ?? null;
             }
         } catch (Throwable) {
             $latestLabel = null; // be conservative: no false "update available"
@@ -519,12 +560,10 @@ class ModpackBrowserPage extends Page
         $this->modpacks  = [];
 
         try {
-            if ($this->provider === 'curseforge') {
-                $service        = app(CurseForgeService::class);
-                $this->modpacks = $service->search($this->search);
+            if ($this->provider === 'all') {
+                $this->modpacks = $this->searchAllProviders($this->search);
             } else {
-                $service        = app(ModrinthService::class);
-                $this->modpacks = $service->search($this->search);
+                $this->modpacks = $this->providerService($this->provider)->search($this->search);
             }
         } catch (Throwable $e) {
             $this->errorMsg = $e->getMessage();
@@ -534,13 +573,69 @@ class ModpackBrowserPage extends Page
         }
     }
 
-    private function fetchSingleModpack(string|int $id): array
+    /**
+     * Query the combined-view providers (CurseForge + Modrinth — the fast ones)
+     * and interleave the results (round-robin) so each source is represented
+     * near the top rather than one drowning out the rest. A single provider
+     * failing (e.g. CurseForge key missing) is logged and skipped, never
+     * aborting the whole search. FTB/ATLauncher are excluded here for speed and
+     * are reached through their own tabs.
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    private function searchAllProviders(string $query, int $perProvider = 10): array
     {
-        if ($this->provider === 'curseforge') {
+        $buckets = [];
+
+        foreach (self::COMBINED_PROVIDERS as $provider) {
+            try {
+                $buckets[$provider] = array_slice(
+                    $this->providerService($provider)->search($query),
+                    0,
+                    $perProvider
+                );
+            } catch (Throwable $e) {
+                Log::info("[ModpackManager] '{$provider}' search skipped in combined view", ['error' => $e->getMessage()]);
+                $buckets[$provider] = [];
+            }
+        }
+
+        $merged = [];
+        for ($i = 0; $i < $perProvider; $i++) {
+            foreach ($buckets as $packs) {
+                if (isset($packs[$i])) {
+                    $merged[] = $packs[$i];
+                }
+            }
+        }
+
+        return $merged;
+    }
+
+    private function fetchSingleModpack(string|int $id, ?string $provider = null): array
+    {
+        $provider ??= $this->provider;
+
+        if ($provider === 'curseforge') {
             return app(CurseForgeService::class)->getMod((int) $id);
         }
 
-        return app(ModrinthService::class)->getProject((string) $id);
+        return $this->providerService($provider)->getProject((string) $id);
+    }
+
+    /**
+     * Resolve the search/getProject service for a provider. CurseForge has a
+     * different method shape (getFiles/getMod), so callers that need those still
+     * reference it directly; this covers the uniform search()/getProject() calls.
+     */
+    private function providerService(string $provider): object
+    {
+        return match ($provider) {
+            'modrinth'   => app(ModrinthService::class),
+            'ftb'        => app(FtbService::class),
+            'atlauncher' => app(ATLauncherService::class),
+            default      => app(CurseForgeService::class),
+        };
     }
 
     private function resolveDownloadUrl(array $modpack, string $versionId): string
@@ -574,9 +669,11 @@ class ModpackBrowserPage extends Page
             return $versionId;
         }
 
-        return $provider === 'modrinth'
-            ? ($version['versionNumber'] ?? $version['name'] ?? $versionId)
-            : ($version['displayName'] ?? $versionId);
+        // CurseForge/FTB/ATLauncher expose a displayName; Modrinth uses versionNumber/name.
+        return $version['displayName']
+            ?? $version['versionNumber']
+            ?? $version['name']
+            ?? $versionId;
     }
 
     private function resumeWatchingInstall(ModpackInstall $record): void

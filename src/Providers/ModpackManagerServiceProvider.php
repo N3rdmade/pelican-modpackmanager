@@ -2,7 +2,6 @@
 
 namespace Cosmii02\ModpackManager\Providers;
 
-use Cosmii02\ModpackManager\Console\Commands\CheckModpackUpdatesCommand;
 use Illuminate\Console\Scheduling\Schedule;
 use Illuminate\Support\ServiceProvider;
 
@@ -18,21 +17,9 @@ class ModpackManagerServiceProvider extends ServiceProvider
 
     public function boot(): void
     {
-        $this->loadMigrationsFrom(
-            plugin_path('modpack-manager', 'database/migrations')
-        );
-
-        $this->loadViewsFrom(
-            plugin_path('modpack-manager', 'resources/views'),
-            'modpack-manager'
-        );
-
-        if ($this->app->runningInConsole()) {
-            $this->commands([
-                CheckModpackUpdatesCommand::class,
-            ]);
-        }
-
+        // Pelican auto-discovers plugin views (under the `modpack-manager::`
+        // namespace), migrations and artisan commands, so we don't register
+        // them here. We only need to wire up our scheduled task.
         $this->scheduleUpdateChecks();
     }
 

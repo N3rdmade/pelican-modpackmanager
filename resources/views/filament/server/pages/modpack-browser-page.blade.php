@@ -23,6 +23,8 @@
         --mpm-primary:   #6366f1;
         --mpm-cf:        #f16436;
         --mpm-mr:        #1bd96a;
+        --mpm-ftb:       #d6332b;
+        --mpm-atl:       #1d9bf0;
         --mpm-success:   #10b981;
         --mpm-warn:      #f59e0b;
         --mpm-danger:    #ef4444;
@@ -101,10 +103,16 @@
     }
     .mpm-tab:hover { color:var(--mpm-text); border-color:var(--mpm-border-2); }
     .mpm-tab .dot { width:8px; height:8px; border-radius:50%; }
+    .mpm-tab--all .dot { background:conic-gradient(var(--mpm-cf),var(--mpm-mr),var(--mpm-atl),var(--mpm-ftb),var(--mpm-cf)); }
+    .mpm-tab--all.is-active { background:var(--mpm-primary); border-color:var(--mpm-primary); color:#fff; }
     .mpm-tab--cf .dot { background:var(--mpm-cf); }
     .mpm-tab--mr .dot { background:var(--mpm-mr); }
+    .mpm-tab--ftb .dot { background:var(--mpm-ftb); }
+    .mpm-tab--atl .dot { background:var(--mpm-atl); }
     .mpm-tab--cf.is-active { background:var(--mpm-cf); border-color:var(--mpm-cf); color:#fff; }
     .mpm-tab--mr.is-active { background:var(--mpm-mr); border-color:var(--mpm-mr); color:#06281a; }
+    .mpm-tab--ftb.is-active { background:var(--mpm-ftb); border-color:var(--mpm-ftb); color:#fff; }
+    .mpm-tab--atl.is-active { background:var(--mpm-atl); border-color:var(--mpm-atl); color:#fff; }
     .mpm-tab.is-active .dot { background:currentColor; }
 
     /* ── Installed banner ── */
@@ -140,6 +148,9 @@
         border:1px solid color-mix(in srgb, var(--mpm-loader-c) 45%, transparent);
         color:var(--mpm-loader-c); background:color-mix(in srgb, var(--mpm-loader-c) 14%, transparent); }
     .mpm-loader::before { content:""; width:6px; height:6px; border-radius:50%; background:var(--mpm-loader-c); }
+    /* Provider tag: filled with the provider colour so it reads as the source badge. */
+    .mpm-ptag { color:#fff; background:var(--mpm-loader-c); border-color:var(--mpm-loader-c); }
+    .mpm-ptag::before { background:rgba(255,255,255,.85); }
     .mpm-pack__desc { font-size:.8rem; color:var(--mpm-text-2); line-height:1.5; margin:0;
         display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
     .mpm-pack__foot { margin-top:auto; padding-top:4px; }
@@ -232,9 +243,18 @@
     /* ── Modal ── */
     .mpm-overlay { position:fixed; inset:0; z-index:60; display:flex; align-items:center; justify-content:center; padding:16px;
         background:rgba(2,6,23,.62); backdrop-filter:blur(4px); }
-    .mpm-modal { width:100%; max-width:540px; max-height:90vh; overflow-y:auto;
+    .mpm-modal { position:relative; width:100%; max-width:540px; max-height:90vh; overflow-y:auto;
         background:var(--mpm-surface); border:1px solid var(--mpm-border-2);
         border-radius:18px; box-shadow:var(--mpm-shadow-lg); }
+    /* Instant client-side overlay shown the moment Install is pressed, so the
+       Livewire round-trip to startInstall reads as a smooth transition. */
+    .mpm-modal__starting { position:absolute; inset:0; z-index:5; border-radius:18px;
+        flex-direction:column; align-items:center; justify-content:center; gap:14px; text-align:center;
+        background:color-mix(in srgb, var(--mpm-surface) 86%, transparent); backdrop-filter:blur(3px);
+        animation: mpm-fade .22s cubic-bezier(.16,1,.3,1) both; }
+    .mpm-modal__starting .mpm-spin { width:36px; height:36px; color:var(--mpm-primary); }
+    .mpm-modal__starting p { margin:0; font-weight:600; color:var(--mpm-text); }
+    .mpm-modal__starting small { color:var(--mpm-text-2); font-size:.78rem; }
     .mpm-modal__head { display:flex; align-items:flex-start; gap:13px; padding:18px 20px; border-bottom:1px solid var(--mpm-border); }
     .mpm-modal__icon { width:48px; height:48px; border-radius:11px; object-fit:cover; border:1px solid var(--mpm-border); flex-shrink:0; }
     .mpm-modal__title { font-size:1rem; font-weight:700; margin:0; line-height:1.3; }
@@ -443,7 +463,7 @@
                     @endif
                 </div>
                 @if($updateAvailable)
-                    <button type="button" wire:click="openModal('{{ $installedModpack['id'] }}')" class="mpm-btn mpm-btn--update">
+                    <button type="button" wire:click="openModal('{{ $installedModpack['id'] }}', '{{ $installedModpack['provider'] ?? '' }}')" class="mpm-btn mpm-btn--update">
                         <svg fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
                         Update Available
                     </button>
@@ -461,7 +481,7 @@
             <div class="mpm-head">
                 <div>
                     <h2 class="mpm-title">Modpack Browser</h2>
-                    <p class="mpm-sub">Browse and install modpacks from CurseForge &amp; Modrinth.</p>
+                    <p class="mpm-sub">Browse and install modpacks from CurseForge, Modrinth, FTB &amp; ATLauncher.</p>
                 </div>
                 <div>
                     <div class="mpm-search">
@@ -470,17 +490,26 @@
                     </div>
                     <div class="mpm-filters">
                         <span>Active filters</span>
-                        <span class="mpm-chip">Provider: {{ ucfirst($provider) }}</span>
+                        <span class="mpm-chip">Provider: {{ ['all'=>'All','curseforge'=>'CurseForge','modrinth'=>'Modrinth','ftb'=>'FTB','atlauncher'=>'ATLauncher'][$provider] ?? ucfirst($provider) }}</span>
                     </div>
                 </div>
             </div>
 
             <div class="mpm-tabs">
+                <button type="button" wire:click="setProvider('all')" class="mpm-tab mpm-tab--all {{ $provider === 'all' ? 'is-active' : '' }}">
+                    <span class="dot"></span> All
+                </button>
                 <button type="button" wire:click="setProvider('curseforge')" class="mpm-tab mpm-tab--cf {{ $provider === 'curseforge' ? 'is-active' : '' }}">
                     <span class="dot"></span> CurseForge
                 </button>
                 <button type="button" wire:click="setProvider('modrinth')" class="mpm-tab mpm-tab--mr {{ $provider === 'modrinth' ? 'is-active' : '' }}">
                     <span class="dot"></span> Modrinth
+                </button>
+                <button type="button" wire:click="setProvider('ftb')" class="mpm-tab mpm-tab--ftb {{ $provider === 'ftb' ? 'is-active' : '' }}">
+                    <span class="dot"></span> FTB
+                </button>
+                <button type="button" wire:click="setProvider('atlauncher')" class="mpm-tab mpm-tab--atl {{ $provider === 'atlauncher' ? 'is-active' : '' }}">
+                    <span class="dot"></span> ATLauncher
                 </button>
             </div>
         </div>
@@ -513,7 +542,9 @@
             <div class="mpm-grid">
                 @foreach($modpacks as $i => $pack)
                     @php
-                        $isInstalled = $installedModpack && $installedModpack['id'] == $pack['id'];
+                        $isInstalled = $installedModpack
+                            && (string) $installedModpack['id'] === (string) $pack['id']
+                            && ($installedModpack['provider'] ?? null) === ($pack['provider'] ?? null);
                         $dl = (int) ($pack['downloadCount'] ?? 0);
                         $dlFmt = $dl >= 1000000 ? round($dl/1000000,1).'M' : ($dl >= 1000 ? round($dl/1000).'K' : $dl);
                     @endphp
@@ -542,39 +573,43 @@
                                         </span>
                                     @endif
                                 </div>
-                                @if(!empty($pack['loaders']))
-                                    <div class="mpm-loaders">
-                                        @foreach($pack['loaders'] as $loader)
-                                            @php
-                                                $lc = match(strtolower($loader)) {
-                                                    'forge'      => '#d97706',
-                                                    'neoforge'   => '#f97316',
-                                                    'fabric'     => '#c9a16b',
-                                                    'quilt'      => '#a855f7',
-                                                    'liteloader' => '#38bdf8',
-                                                    default      => '#94a3b8',
-                                                };
-                                            @endphp
-                                            <span class="mpm-loader" style="--mpm-loader-c:{{ $lc }};">{{ $loader }}</span>
-                                        @endforeach
-                                    </div>
-                                @endif
+                                <div class="mpm-loaders">
+                                    @php
+                                        $pv = $pack['provider'] ?? '';
+                                        $pvLabel = ['curseforge'=>'CurseForge','modrinth'=>'Modrinth','ftb'=>'FTB','atlauncher'=>'ATLauncher'][$pv] ?? ucfirst($pv);
+                                        $pvColor = ['curseforge'=>'var(--mpm-cf)','modrinth'=>'#18bf5d','ftb'=>'var(--mpm-ftb)','atlauncher'=>'var(--mpm-atl)'][$pv] ?? '#94a3b8';
+                                    @endphp
+                                    <span class="mpm-loader mpm-ptag" style="--mpm-loader-c:{{ $pvColor }};">{{ $pvLabel }}</span>
+                                    @foreach(($pack['loaders'] ?? []) as $loader)
+                                        @php
+                                            $lc = match(strtolower($loader)) {
+                                                'forge'      => '#d97706',
+                                                'neoforge'   => '#f97316',
+                                                'fabric'     => '#c9a16b',
+                                                'quilt'      => '#a855f7',
+                                                'liteloader' => '#38bdf8',
+                                                default      => '#94a3b8',
+                                            };
+                                        @endphp
+                                        <span class="mpm-loader" style="--mpm-loader-c:{{ $lc }};">{{ $loader }}</span>
+                                    @endforeach
+                                </div>
                             </div>
                         </div>
                         <p class="mpm-pack__desc">{{ $pack['summary'] }}</p>
                         <div class="mpm-pack__foot">
                             @if($isInstalled && $updateAvailable)
-                                <button type="button" wire:click="openModal('{{ $pack['id'] }}')" class="mpm-btn mpm-btn--update">
+                                <button type="button" wire:click="openModal('{{ $pack['id'] }}', '{{ $pack['provider'] ?? '' }}')" class="mpm-btn mpm-btn--update">
                                     <svg fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
                                     Update Available
                                 </button>
                             @elseif($isInstalled)
-                                <button type="button" wire:click="openModal('{{ $pack['id'] }}')" class="mpm-btn mpm-btn--ghost" style="width:100%;">
+                                <button type="button" wire:click="openModal('{{ $pack['id'] }}', '{{ $pack['provider'] ?? '' }}')" class="mpm-btn mpm-btn--ghost" style="width:100%;">
                                     <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" style="color:var(--mpm-success);"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7"/></svg>
                                     Installed · Reinstall
                                 </button>
                             @else
-                                <button type="button" wire:click="openModal('{{ $pack['id'] }}')" class="mpm-btn mpm-btn--install">
+                                <button type="button" wire:click="openModal('{{ $pack['id'] }}', '{{ $pack['provider'] ?? '' }}')" class="mpm-btn mpm-btn--install">
                                     <svg fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
                                     Install
                                 </button>
@@ -600,9 +635,19 @@
     <div class="mpm-overlay" x-show="modalOpen" x-cloak x-transition.opacity
          @keydown.escape.window="$wire.closeModal()" @click.self="$wire.closeModal()">
         <div class="mpm-modal" x-show="modalOpen" x-transition>
+                    {{-- Fades in instantly on click (client-side), masking the startInstall round-trip. --}}
+                    <div class="mpm-modal__starting" wire:loading.flex wire:target="startInstall">
+                        <svg class="mpm-spin" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+                        <div>
+                            <p>Preparing installation…</p>
+                            <small>Setting things up on your server</small>
+                        </div>
+                    </div>
                     @if($selectedModpack)
                         @php
-                            $isInstalledPack = $installedModpack && $installedModpack['id'] == $selectedModpack['id'];
+                            $isInstalledPack = $installedModpack
+                                && (string) $installedModpack['id'] === (string) $selectedModpack['id']
+                                && ($installedModpack['provider'] ?? null) === ($selectedModpack['provider'] ?? null);
                             $isUpd       = $isInstalledPack && $updateAvailable;
                             $actionLabel = $isUpd ? 'Update' : ($isInstalledPack ? 'Reinstall' : 'Install');
                         @endphp
@@ -619,7 +664,9 @@
                             </button>
                         </div>
 
-                        <div class="mpm-modal__body">
+                        <div class="mpm-modal__body"
+                             wire:key="modal-{{ $selectedModpack['provider'] ?? '' }}-{{ $selectedModpack['id'] ?? '' }}"
+                             wire:init="loadVersions">
                             <div>
                                 <p class="mpm-eyebrow">Installation Type</p>
                                 <span class="mpm-badge {{ $isUpd ? 'mpm-badge--update' : 'mpm-badge--install' }}">
@@ -654,7 +701,7 @@
                                         <select class="mpm-select" wire:model="selectedVersion">
                                             @foreach($versions as $ver)
                                                 @php
-                                                    $label = $provider === 'modrinth' ? ($ver['versionNumber'] ?? $ver['name']) : ($ver['displayName'] ?? $ver['fileName']);
+                                                    $label = $ver['displayName'] ?? $ver['versionNumber'] ?? $ver['name'] ?? $ver['fileName'] ?? $ver['id'];
                                                     $date = isset($ver['datePublished']) ? \Carbon\Carbon::parse($ver['datePublished'])->format('M j, Y')
                                                           : (isset($ver['fileDate']) ? \Carbon\Carbon::parse($ver['fileDate'])->format('M j, Y') : '');
                                                 @endphp
