@@ -172,6 +172,18 @@ time a new version appears.
   records the version last announced so repeated runs don't re-spam the owner.
 - A provider error returns `null` (no false "update available").
 
+## Egg-tag visibility filter
+
+The Modpacks page only shows on servers whose **egg** carries one of the
+configured tags (matched case-insensitively against `Egg::$tags`). Default is
+`minecraft`. Admins edit the list in **Plugin settings → Server visibility**
+(a `TagsInput`); it persists to `MODPACK_MANAGER_EGG_TAGS` (comma-separated) and
+is parsed into `config('modpack-manager.required_egg_tags')`. An **empty** list
+disables the filter (page shows on every server). Enforced in `canAccess()`
+(`eggHasAllowedTag()`), so it hides the page *and* its nav entry. Note: on a
+`config:cache`d panel the new value takes effect after the config cache is
+refreshed (same as the API-key settings).
+
 ## Permission gate
 
 The Modpacks page is gated on a Pelican subuser permission so it isn't exposed

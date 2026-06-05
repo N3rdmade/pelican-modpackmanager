@@ -5,6 +5,7 @@ namespace Cosmii02\ModpackManager;
 use App\Contracts\Plugins\HasPluginSettings;
 use App\Traits\EnvironmentWriterTrait;
 use Filament\Contracts\Plugin;
+use Filament\Forms\Components\TagsInput;
 use Filament\Forms\Components\TextInput;
 use Filament\Forms\Components\Placeholder;
 use Filament\Schemas\Components\Section;
@@ -71,6 +72,16 @@ class ModpackManagerPlugin implements Plugin, HasPluginSettings
                         ->default(fn () => config('modpack-manager.modrinth_token')),
                 ]),
 
+            Section::make('Server visibility')
+                ->description('The Modpacks page only appears on servers whose egg has one of these tags (case-insensitive). Leave empty to show it on every server.')
+                ->schema([
+                    TagsInput::make('required_egg_tags')
+                        ->label('Required egg tags')
+                        ->placeholder('Add a tag')
+                        ->helperText('Default: minecraft. Press Enter to add each tag.')
+                        ->default(fn () => config('modpack-manager.required_egg_tags')),
+                ]),
+
             Section::make('About')
                 ->schema([
                     Placeholder::make('info')
@@ -90,6 +101,15 @@ class ModpackManagerPlugin implements Plugin, HasPluginSettings
 
         if (isset($data['modrinth_token'])) {
             $values['MODPACK_MANAGER_MODRINTH_TOKEN'] = $data['modrinth_token'];
+        }
+
+        if (array_key_exists('required_egg_tags', $data)) {
+            $tags = is_array($data['required_egg_tags']) ? $data['required_egg_tags'] : [];
+            $tags = array_values(array_filter(
+                array_map(fn ($t) => trim((string) $t), $tags),
+                fn ($t) => $t !== ''
+            ));
+            $values['MODPACK_MANAGER_EGG_TAGS'] = implode(',', $tags);
         }
 
         $this->writeToEnvironment($values);

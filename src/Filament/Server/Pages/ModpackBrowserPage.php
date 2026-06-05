@@ -91,12 +91,40 @@ class ModpackBrowserPage extends Page
     // ─── Authorization ──────────────────────────────────────────────────────────
 
     /**
-     * Hide the page (and its nav entry) from users without the manage permission.
+     * Hide the page (and its nav entry) unless the server's egg carries one of
+     * the configured tags (default "minecraft") and the user has the manage
+     * permission.
      */
     public static function canAccess(): bool
     {
+        $server = Filament::getTenant();
+
         return parent::canAccess()
-            && user()?->can(self::MANAGE_PERMISSION, Filament::getTenant());
+            && $server instanceof Server
+            && self::eggHasAllowedTag($server)
+            && user()?->can(self::MANAGE_PERMISSION, $server);
+    }
+
+    /**
+     * True when the server's egg carries one of the configured required tags
+     * (case-insensitive). An empty configured list disables the filter, so the
+     * page shows on every server.
+     */
+    private static function eggHasAllowedTag(Server $server): bool
+    {
+        $required = array_map('strtolower', config('modpack-manager.required_egg_tags', ['minecraft']));
+
+        if (empty($required)) {
+            return true;
+        }
+
+        foreach ($server->egg?->tags ?? [] as $tag) {
+            if (in_array(strtolower(trim((string) $tag)), $required, true)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private function userCanManage(): bool
