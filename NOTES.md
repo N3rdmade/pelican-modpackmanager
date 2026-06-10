@@ -118,6 +118,24 @@ Fabric pack, or an **ATM10/NeoForge** install, reading a stale **ATM9/Forge**
    On mismatch it treats the launcher as stale, returns false, and lets path B switch the
    egg using the correct loader.
 
+There are **three** server-pack shapes, tried in order:
+
+- **A1. ServerPackCreator** (`start.sh` + `variables.txt`) — bundled launcher, used as-is.
+- **A2. MDK `run.sh`** — bundled launcher, used as-is.
+- **A3. Installer-based** (`detectInstallerJarMeta()`): no run-ready launcher, just a
+  `neoforge-<ver>-installer.jar` / `forge-<mc>-<ver>-installer.jar` (+ a `startserver.sh`
+  that runs it on first boot). AllTheMods packs (ATM10 ships `neoforge-21.1.228-installer.jar`
+  + `startserver.sh`) are this shape. We read the **exact** loader version from the jar
+  filename and route to path B so the matching egg installs precisely that version on top of
+  the pack's mods. The detector is passed the plan's loader and **prefers the installer jar
+  matching it**, so a stale `forge-…-installer.jar` from a previous ATM9 install can't be
+  picked over ATM10's neoforge one. `stepDeleteFiles` also clears stale
+  `(neoforge|forge|fabric|quilt)-*installer.jar` files on every install for the same reason. (The bundled NeoForge egg's install script only `rm -rf`s the old
+  `libraries/net/neoforged/<artifact>` + installer — it never touches `mods/`/`config/`, so
+  the pack survives the reinstall.) We deliberately do **not** drive `startserver.sh`
+  directly: it has its own 10s auto-restart loop and pack-specific env vars that fight
+  Pelican, whereas the egg integrates cleanly.
+
 Most official CurseForge "server pack" downloads are produced by
 **ServerPackCreator** (Griefed) and ship their own launcher — `start.sh` +
 `variables.txt` (and a `run.sh`, multiple loader installers, `user_jvm_args.txt`,

@@ -269,6 +269,26 @@ class ModpackInstallService
             }
         }
 
+        // Also clear stale loader installer jars (forge-/neoforge-/fabric-/quilt- *installer.jar)
+        // a previous pack left in the root — otherwise an old ATM9 forge installer can be picked
+        // up instead of this pack's (e.g. ATM10's neoforge) installer. Runs before download, so
+        // the new pack's own installer (extracted afterwards) is untouched.
+        try {
+            foreach ($this->fileRepo->getDirectory('/') as $e) {
+                $name = (string) ($e['name'] ?? '');
+                if (preg_match('/^(neoforge|forge|fabric|quilt)-.*installer\.jar$/i', $name)) {
+                    try {
+                        $this->fileRepo->deleteFiles('/', [$name]);
+                        $record->appendLog("  Cleared stale installer jar: /{$name}");
+                    } catch (Throwable) {
+                        // ignore
+                    }
+                }
+            }
+        } catch (Throwable) {
+            // Directory unreadable; ignore.
+        }
+
         if (!($options['delete_existing'] ?? false)) {
             $record->appendLog('Skipping directory deletion ("Delete existing files" was not enabled).');
             $record->update(['progress' => 24]);
@@ -277,7 +297,7 @@ class ModpackInstallService
         }
 
         $record->appendLog('Removing old mod/pack directories…');
-        foreach (['mods', 'config', 'scripts', 'kubejs', 'defaultconfigs', 'patchouli_books', 'resourcepacks', 'shaderpacks'] as $dir) {
+        foreach (['mods', 'config', 'scripts', 'kubejs', 'defaultconfigs', 'patchouli_books', 'resourcepacks', 'shaderpacks', 'datapacks'] as $dir) {
             try {
                 $this->fileRepo->deleteFiles('/', [$dir]);
                 $record->appendLog("  Deleted: /{$dir}/");
@@ -455,9 +475,25 @@ class ModpackInstallService
             // launcher, so we must NOT run this detection — otherwise a stale start.sh/run.sh
             // left behind by a *previous* server-pack install gets mistaken for this pack's
             // launcher and the egg is never switched (e.g. a Fabric pack landing on Forge).
-            if ($plan['mode'] === 'server_pack' && $this->configureSelfContainedPack($record, $plan)) {
-                $record->markStepDone('configure_loader');
-                return;
+            if ($plan['mode'] === 'server_pack') {
+                // 1. Genuine bundled launcher (ServerPackCreator start.sh / MDK run.sh) that
+                //    installs AND launches the loader itself — use it as-is, no reinstall.
+                if ($this->configureSelfContainedPack($record, $plan)) {
+                    $record->markStepDone('configure_loader');
+                    return;
+                }
+
+                // 2. Installer-based server pack (AllTheMods-style: startserver.sh + a
+                //    neoforge/forge installer jar, no run-ready launcher). The exact loader
+                //    version is in the installer jar's filename — feed it to the egg path so
+                //    the matching egg installs precisely that version on top of the mods.
+                $installer = $this->detectInstallerJarMeta($record, $plan['loader'] ?? null);
+                if ($installer) {
+                    $plan['loader']  = $installer['loader'];
+                    $plan['version'] = $installer['version'] ?? ($plan['version'] ?? null);
+                    $plan['mc']      = $plan['mc'] ?: ($installer['mc'] ?? null);
+                    $record->appendLog("  Installer-based server pack — will install {$installer['loader']} {$installer['version']} via the matching egg.");
+                }
             }
 
             // Otherwise we assembled the files ourselves (only mods/ + overrides, no launcher),
@@ -829,6 +865,49 @@ class ModpackInstallService
             return ['loader' => 'forge', 'version' => $m[2], 'mc' => $m[1]];
         }
         return ['loader' => null, 'version' => null, 'mc' => null];
+    }
+
+    /**
+     * Detect an installer-based server pack by the loader installer jar it ships in the root,
+     * e.g. AllTheMods packs bundle `neoforge-21.1.228-installer.jar` (+ a startserver.sh that
+     * runs it) or `forge-1.20.1-47.4.20-installer.jar`. The exact loader version lives in the
+     * filename, which is what we want to hand the matching egg.
+     *
+     * @return array{loader:string, version:?string, mc:?string}|null
+     */
+    private function detectInstallerJarMeta(ModpackInstall $record, ?string $preferLoader = null): ?array
+    {
+        try {
+            $entries = $this->fileRepo->getDirectory('/');
+        } catch (Throwable) {
+            return null;
+        }
+
+        $found = [];
+        foreach ($entries as $e) {
+            $name = (string) ($e['name'] ?? '');
+
+            if (preg_match('/^neoforge-([0-9][0-9.]*)-installer\.jar$/i', $name, $m)) {
+                $found['neoforge'] = ['loader' => 'neoforge', 'version' => $m[1], 'mc' => $this->mcFromNeoforge($m[1])];
+            } elseif (preg_match('/^forge-([0-9]+\.[0-9]+(?:\.[0-9]+)?)-([0-9][0-9.]*)-installer\.jar$/i', $name, $m)) {
+                // forge-<mc>-<forgever>-installer.jar (e.g. forge-1.20.1-47.4.20-installer.jar)
+                $found['forge'] = ['loader' => 'forge', 'version' => $m[2], 'mc' => $m[1]];
+            }
+        }
+
+        if (!$found) {
+            return null;
+        }
+
+        // Prefer the loader the pack metadata says it is (CurseForge gameVersions, carried on
+        // the plan) — so a stale installer jar from a previous pack (an old ATM9 forge installer)
+        // can never win over this pack's real (neoforge) one.
+        $prefer = $this->normalizeLoader($preferLoader);
+        if ($prefer && isset($found[$prefer])) {
+            return $found[$prefer];
+        }
+
+        return $found['neoforge'] ?? $found['forge'] ?? reset($found);
     }
 
     /**
