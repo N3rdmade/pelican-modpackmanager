@@ -102,6 +102,22 @@ There are **two paths**, because modpacks ship in two very different shapes.
 
 #### A) Self-contained server packs (`configureSelfContainedPack`)
 
+**This path runs only for CurseForge `server_pack` mode.** Every other mode (modrinth,
+curseforge_build, ftb, atlauncher) is assembled by us and ships no launcher, so it skips
+straight to path B.
+
+Stale launcher files are the recurring trap here — a `start.sh`/`variables.txt`/`run.sh`
+left by a *previous* install gets mistaken for the current pack's launcher (e.g. a Modrinth
+Fabric pack, or an **ATM10/NeoForge** install, reading a stale **ATM9/Forge**
+`variables.txt` and keeping the Forge egg). Two defenses:
+
+1. `stepDeleteFiles` **always** deletes `start.sh`/`run.sh`/`variables.txt`/`user_jvm_args.txt`
+   first — even when "Delete existing files" is off — since a new pack ships its own.
+2. `configureSelfContainedPack` **cross-checks** the launcher's parsed loader against the
+   pack's real loader (CurseForge `gameVersions`, carried on the plan via `cfLoaderMeta()`).
+   On mismatch it treats the launcher as stale, returns false, and lets path B switch the
+   egg using the correct loader.
+
 Most official CurseForge "server pack" downloads are produced by
 **ServerPackCreator** (Griefed) and ship their own launcher — `start.sh` +
 `variables.txt` (and a `run.sh`, multiple loader installers, `user_jvm_args.txt`,
@@ -120,6 +136,14 @@ instead we point the server's startup command at the bundled launcher:
   `bash run.sh nogui`; loader/version parsed from the `@libraries/net/.../unix_args.txt`
   path; `user_jvm_args.txt` rewritten to the same `MaxRAMPercentage` args.
 
+Both self-contained shapes also **switch the server to the matching loader egg** (so the
+panel shows the right egg + Java image list) without reinstalling. The loader/MC come from
+the launcher script (`variables.txt` MODLOADER / the `unix_args.txt` path); if that yields
+nothing they fall back to the loader/MC carried on the plan (parsed from the CurseForge
+file's `gameVersions`, e.g. `["1.20.1","NeoForge"]` via `cfLoaderMeta()`). This is what
+fixed NeoForge official server packs landing on the Forge egg — a downloaded server pack
+has no `manifest.json`, so the plan-carried loader is the authoritative source.
+
 The docker image is set to `java_<N>` (preferring one the current egg already allows,
 else `ghcr.io/parkervcp/yolks:java_<N>`) from `RECOMMENDED_JAVA_VERSION` or
 `javaForMc()`. **No egg switch, no reinstall** — startup command + image are written
@@ -133,13 +157,34 @@ When WE built the server from a CurseForge *client* manifest or a Modrinth `.mrp
 1. **Detect** loader + versions from `manifest.json`
    (`minecraft.modLoaders[0].id` like `forge-47.2.0`) or `modrinth.index.json`
    `dependencies`.
-2. **Find a matching egg** by its *variable names*: `NEOFORGE_VERSION` → NeoForge;
-   `FORGE_VERSION` (and not NeoForge/`SPONGE_TYPE`) → Forge; `FABRIC_VERSION`/
-   `LOADER_VERSION` → Fabric.
-3. **Switch egg + set vars** via `StartupModificationService` at
-   `User::USER_LEVEL_ADMIN`. Egg variable defaults are seeded first, then
-   `MC_VERSION` (or `MINECRAFT_VERSION`) and the loader-version var overridden;
-   Java image chosen by `javaForMc()` (1.20.5+/1.21 → 21, 1.17–1.20.4 → 17, ≤1.16 → 8).
+2. **Find a matching egg** via `findLoaderEgg()`, which *scores* every installed egg
+   and picks the best (not the first match — so a generic Forge egg listed before the
+   NeoForge egg can't win a neoforge lookup). A defining variable scores highest:
+   `NEOFORGE_VERSION` → NeoForge; `FORGE_VERSION` (and **not** NeoForge by var/name,
+   and not `SPONGE_TYPE`) → Forge; `FABRIC_VERSION`/`LOADER_VERSION` → Fabric. The egg
+   **name** is a fallback signal (name matching `neo[\s_-]*forge` → NeoForge, etc.) for
+   eggs that name their version variable unconventionally. A Forge egg never scores for
+   neoforge and vice-versa, so a neoforge pack can never fall back onto the Forge egg.
+   The loader-version variable is then written to whichever of
+   `NEOFORGE_VERSION`/`FORGE_VERSION`/`BUILD_VERSION` (etc.) the egg actually defines.
+   If no matching egg is installed, `importBundledLoaderEgg()` imports a bundled egg
+   from `resources/eggs/<loader>.json` (currently `neoforge.json`, the official
+   pelican-eggs NeoForge egg in PTDL_v2 form) via `EggImporterService::fromContent()`,
+   then re-scores. This is why a panel that only ships Forge/Fabric still gets the
+   NeoForge egg automatically on the first neoforge install. Best-effort — a failed
+   import just logs and leaves the egg unchanged.
+3. **Switch egg + set vars** via Pelican's canonical `EggChangerService::handle(
+   $server, $egg, keepOldVariables: false)`. This is important: it switches `egg_id`
+   (and the default image/startup) **and deletes the old server variables** before
+   recreating the new egg's set. The earlier `StartupModificationService` path only
+   *upserted* variables — it never removed the previous egg's, so installing
+   Fabric→Forge→NeoForge on one server piled `FABRIC_VERSION`/`FORGE_VERSION`/
+   `NEOFORGE_VERSION` all onto it and (under non-admin validation) often didn't switch
+   the egg at all. After the switch, `applyLoaderVariables()` overrides `MC_VERSION`
+   (or `MINECRAFT_VERSION`) and the loader-version var (`NEOFORGE_VERSION`/
+   `FORGE_VERSION`/`BUILD_VERSION` / `LOADER_VERSION`…) directly on the new
+   `ServerVariable` rows. Java image chosen by `javaForMc()` (1.20.5+/1.21 → 21,
+   1.17–1.20.4 → 17, ≤1.16 → 8).
 4. **Reinstall** via `ReinstallServerService::handle($server)` so the egg installs
    the loader server.
 

@@ -124,6 +124,8 @@ class CurseForgeService
             'downloadUrl'      => $f['downloadUrl'] ?? null,
             'isServerPack'     => (bool) ($f['isServerPack'] ?? false),
             'serverPackFileId' => $f['serverPackFileId'] ?? null,
+            // Mix of MC versions and loader names, e.g. ["1.20.1", "NeoForge"].
+            'gameVersions'     => $f['gameVersions'] ?? [],
         ];
     }
 

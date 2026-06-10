@@ -2,13 +2,15 @@
 
 namespace Cosmii02\ModpackManager\Services;
 
+use App\Enums\EggFormat;
 use App\Models\Egg;
 use App\Models\Server;
-use App\Models\User;
+use App\Models\ServerVariable;
 use App\Repositories\Daemon\DaemonFileRepository;
 use App\Services\Backups\InitiateBackupService;
+use App\Services\Eggs\EggChangerService;
+use App\Services\Eggs\Sharing\EggImporterService;
 use App\Services\Servers\ReinstallServerService;
-use App\Services\Servers\StartupModificationService;
 use Cosmii02\ModpackManager\Models\ModpackInstall;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
@@ -150,19 +152,24 @@ class ModpackInstallService
 
         $file = $cf->getFile($modId, $fileId);
 
+        // The loader/MC are listed on the file metadata (e.g. ["1.20.1","NeoForge"]).
+        // A downloaded *server* pack often has no manifest.json, so carry this along as
+        // the authoritative loader source for the egg switch.
+        ['loader' => $cfLoader, 'mc' => $cfMc] = $this->cfLoaderMeta($file['gameVersions'] ?? []);
+
         if (!empty($file['isServerPack'])) {
             $record->appendLog('Selected file is already a server pack — installing directly.');
-            return ['mode' => 'server_pack', 'archiveUrl' => $cf->getDownloadUrl($modId, $fileId)];
+            return ['mode' => 'server_pack', 'archiveUrl' => $cf->getDownloadUrl($modId, $fileId), 'loader' => $cfLoader, 'mc' => $cfMc, 'version' => null];
         }
 
         if (!empty($file['serverPackFileId'])) {
             $serverPackId = (int) $file['serverPackFileId'];
             $record->appendLog("Official server pack found (file #{$serverPackId}) — using it.");
-            return ['mode' => 'server_pack', 'archiveUrl' => $cf->getDownloadUrl($modId, $serverPackId)];
+            return ['mode' => 'server_pack', 'archiveUrl' => $cf->getDownloadUrl($modId, $serverPackId), 'loader' => $cfLoader, 'mc' => $cfMc, 'version' => null];
         }
 
         $record->appendLog('No official server pack available — building one from the client pack.');
-        return ['mode' => 'curseforge_build', 'archiveUrl' => $cf->getDownloadUrl($modId, $fileId)];
+        return ['mode' => 'curseforge_build', 'archiveUrl' => $cf->getDownloadUrl($modId, $fileId), 'loader' => $cfLoader, 'mc' => $cfMc, 'version' => null];
     }
 
     // ─── Steps ──────────────────────────────────────────────────────────────
@@ -248,8 +255,22 @@ class ModpackInstallService
     {
         $record->markStepRunning('delete_files');
 
+        // ALWAYS clear launcher scripts a previous self-contained server pack may have left,
+        // even when "Delete existing files" is off. A new pack ships its own launcher, so any
+        // pre-existing one is stale — and a stale variables.txt is exactly what makes a
+        // NeoForge pack (ATM10) get read as the previous Forge pack (ATM9) and keep the wrong
+        // egg. These are tiny launcher files, never user data.
+        foreach (['start.sh', 'run.sh', 'variables.txt', 'user_jvm_args.txt'] as $file) {
+            try {
+                $this->fileRepo->deleteFiles('/', [$file]);
+                $record->appendLog("  Cleared stale launcher file: /{$file}");
+            } catch (Throwable) {
+                // Usually absent; ignore.
+            }
+        }
+
         if (!($options['delete_existing'] ?? false)) {
-            $record->appendLog('Skipping deletion ("Delete existing files" was not enabled).');
+            $record->appendLog('Skipping directory deletion ("Delete existing files" was not enabled).');
             $record->update(['progress' => 24]);
             $record->markStepDone('delete_files');
             return;
@@ -428,7 +449,13 @@ class ModpackInstallService
             // Self-contained server packs (ServerPackCreator's start.sh, or a Forge/NeoForge
             // MDK run.sh) install AND launch their own loader. For those we just point the
             // server's startup command at the bundled launcher — no egg switch, no reinstall.
-            if ($this->configureSelfContainedPack($record)) {
+            //
+            // ONLY a CurseForge official server pack can ship its own launcher. Every other
+            // mode (modrinth, curseforge_build, ftb, atlauncher) is assembled by us with no
+            // launcher, so we must NOT run this detection — otherwise a stale start.sh/run.sh
+            // left behind by a *previous* server-pack install gets mistaken for this pack's
+            // launcher and the egg is never switched (e.g. a Fabric pack landing on Forge).
+            if ($plan['mode'] === 'server_pack' && $this->configureSelfContainedPack($record, $plan)) {
                 $record->markStepDone('configure_loader');
                 return;
             }
@@ -458,7 +485,7 @@ class ModpackInstallService
      * Returns true if it handled the pack (caller should stop); false to fall through to the
      * loader-egg + reinstall path.
      */
-    private function configureSelfContainedPack(ModpackInstall $record): bool
+    private function configureSelfContainedPack(ModpackInstall $record, array $plan = []): bool
     {
         // Index the server root (case-insensitively).
         $root = [];
@@ -493,18 +520,38 @@ class ModpackInstallService
                 ? (int) $vars['RECOMMENDED_JAVA_VERSION']
                 : null;
             $startup   = 'bash start.sh';
-
-            $record->appendLog('  ServerPackCreator pack detected — launching via start.sh.');
-            $this->applyServerPackCreatorTweaks($record, $this->normalizeLoader($loader) ?? '');
         } else {
             // Plain Forge/NeoForge MDK server pack with a run.sh launcher.
             ['loader' => $loader, 'version' => $loaderVer, 'mc' => $mc] =
                 $this->parseRunSh((string) $this->fileRepo->getContent('/run.sh', 256 * 1024));
             $startup = 'bash run.sh nogui';
+        }
 
+        // Stale-launcher guard: if the pack's real loader (CurseForge `gameVersions`, carried
+        // on the plan) contradicts what the on-disk launcher claims, the launcher is a leftover
+        // from a previous install — bail so the normal egg-switch path handles this pack with
+        // the correct loader. This is what catches an ATM10 (NeoForge) install reading a stale
+        // ATM9 (Forge) variables.txt.
+        $planLoader = $this->normalizeLoader($plan['loader'] ?? null);
+        $diskLoader = $this->normalizeLoader($loader);
+        if ($planLoader && $diskLoader && $planLoader !== $diskLoader) {
+            $record->appendLog("  Ignoring a stale launcher script (it says “{$diskLoader}”, but this pack is “{$planLoader}”) — installing as a normal pack instead.");
+            return false;
+        }
+
+        if ($hasSpc) {
+            $record->appendLog('  ServerPackCreator pack detected — launching via start.sh.');
+            $this->applyServerPackCreatorTweaks($record, $this->normalizeLoader($loader) ?? '');
+        } else {
             $record->appendLog('  Self-contained server pack detected — launching via run.sh' . ($loader ? " ({$loader})" : '') . '.');
             $this->writeUserJvmArgs($record);
         }
+
+        // Fall back to the loader/MC carried on the plan (CurseForge file metadata) if the
+        // launcher script didn't reveal them — guarantees the egg can still be switched.
+        $loader    = $loader    ?: ($plan['loader']  ?? null);
+        $mc        = $mc        ?: ($plan['mc']       ?? null);
+        $loaderVer = $loaderVer ?: ($plan['version']  ?? null);
 
         // Switch the server to the matching loader egg (correct egg + Java image list in the
         // panel) — but do NOT reinstall, so the bundled loader/files survive.
@@ -589,54 +636,72 @@ class ModpackInstallService
     {
         $egg = $this->findLoaderEgg($loader);
         if (!$egg) {
-            $record->appendLog("  No {$loader} egg installed on this panel — egg left unchanged. Install one to get the matching egg.");
+            // No matching egg installed — try to import a bundled one (e.g. many panels
+            // ship Forge/Fabric but not NeoForge), then retry the match.
+            $egg = $this->importBundledLoaderEgg($record, $loader);
+        }
+        if (!$egg) {
+            $record->appendLog("  No {$loader} egg installed on this panel and none bundled — egg left unchanged. Install a {$loader} egg to enable auto-switching.");
             return null;
         }
 
         if ((int) $server->egg_id === (int) $egg->id) {
             $record->appendLog("  Server already on the “{$egg->name}” egg.");
+            $this->applyLoaderVariables($record, $server, $egg, $loader, $mc, $ver);
             return $egg;
         }
 
-        // Seed every variable the egg defines with its default (so required vars validate),
-        // then override the MC + loader-version variables.
-        $env = [];
-        foreach ($egg->variables as $v) {
-            $env[$v->env_variable] = (string) ($v->default_value ?? '');
-        }
+        // Use Pelican's canonical egg changer: it switches egg_id (+ default image/startup)
+        // AND deletes the old server variables before recreating the new egg's set, so we
+        // never leave stale Forge/Fabric/NeoForge vars piled on the server. (The old
+        // StartupModificationService path only upserted variables — it never removed the
+        // previous egg's ones, which is what caused the variable accumulation.)
+        app(EggChangerService::class)->handle($server, $egg, keepOldVariables: false);
+        $server->refresh();
 
+        $this->applyLoaderVariables($record, $server, $egg, $loader, $mc, $ver);
+
+        $record->appendLog("  Switched egg to “{$egg->name}”.");
+
+        return $egg;
+    }
+
+    /**
+     * Override the server's MC + loader-version variables on the egg it's currently on.
+     * Writes straight to ServerVariable (the rows EggChangerService just created), picking
+     * whichever variable name the egg actually defines.
+     */
+    private function applyLoaderVariables(ModpackInstall $record, Server $server, Egg $egg, string $loader, ?string $mc, ?string $ver): void
+    {
         $applied = [];
-        $apply = function (string $key, ?string $val) use (&$env, &$applied) {
-            if ($val !== null && $val !== '' && array_key_exists($key, $env)) {
-                $env[$key]     = $val;
-                $applied[$key] = $val;
+
+        $set = function (array $candidates, ?string $val) use ($server, $egg, &$applied) {
+            if ($val === null || $val === '') {
+                return;
+            }
+            foreach ($egg->variables as $v) {
+                if (in_array(strtoupper((string) $v->env_variable), $candidates, true)) {
+                    ServerVariable::query()->updateOrCreate(
+                        ['server_id' => $server->id, 'variable_id' => $v->id],
+                        ['variable_value' => $val]
+                    );
+                    $applied[$v->env_variable] = $val;
+                    return; // first matching variable wins
+                }
             }
         };
 
-        if ($mc) {
-            array_key_exists('MC_VERSION', $env)
-                ? $apply('MC_VERSION', $mc)
-                : $apply('MINECRAFT_VERSION', $mc);
+        $set(['MC_VERSION', 'MINECRAFT_VERSION'], $mc);
+        $set(match ($loader) {
+            'forge'    => ['FORGE_VERSION', 'BUILD_VERSION'],
+            'neoforge' => ['NEOFORGE_VERSION', 'FORGE_VERSION', 'BUILD_VERSION'],
+            'fabric'   => ['LOADER_VERSION', 'FABRIC_VERSION'],
+            default    => [],
+        }, $ver);
+
+        if ($applied) {
+            $record->appendLog('  Set variables: ' . json_encode($applied));
         }
-
-        $loaderVar = match ($loader) {
-            'forge'    => 'FORGE_VERSION',
-            'neoforge' => 'NEOFORGE_VERSION',
-            'fabric'   => 'LOADER_VERSION',
-            default    => null,
-        };
-        if ($loaderVar) {
-            $apply($loaderVar, $ver);
-        }
-
-        /** @var StartupModificationService $svc */
-        $svc = app(StartupModificationService::class);
-        $svc->setUserLevel(User::USER_LEVEL_ADMIN);
-        $svc->handle($server, ['egg_id' => $egg->id, 'environment' => $env]);
-
-        $record->appendLog("  Switched egg to “{$egg->name}”. Set variables: " . json_encode($applied));
-
-        return $egg;
     }
 
     /**
@@ -652,6 +717,38 @@ class ModpackInstallService
             'quilt'                  => 'quilt',
             default                  => null,
         };
+    }
+
+    /**
+     * Pull the loader + Minecraft version out of a CurseForge file's gameVersions list
+     * (a flat mix of MC versions and loader names, e.g. ["1.20.1", "NeoForge", "Client"]).
+     * NeoForge is checked before Forge so a pack tagged with both resolves to neoforge.
+     *
+     * @param array<int, string> $gameVersions
+     * @return array{loader:?string, mc:?string}
+     */
+    private function cfLoaderMeta(array $gameVersions): array
+    {
+        $loader = $mc = null;
+        $found  = [];
+
+        foreach ($gameVersions as $gv) {
+            $s = strtolower(trim((string) $gv));
+            if ($l = $this->normalizeLoader($s)) {
+                $found[$l] = true;
+            } elseif (!$mc && preg_match('/^\d+\.\d+(?:\.\d+)?$/', $s)) {
+                $mc = $s;
+            }
+        }
+
+        foreach (['neoforge', 'forge', 'fabric', 'quilt'] as $candidate) {
+            if (!empty($found[$candidate])) {
+                $loader = $candidate;
+                break;
+            }
+        }
+
+        return ['loader' => $loader, 'mc' => $mc];
     }
 
     /**
@@ -816,7 +913,14 @@ class ModpackInstallService
             // No manifest / unreadable — caller treats null loader as "leave egg alone".
         }
 
-        return ['loader' => $loader, 'mc' => $mc, 'version' => $version];
+        // Fall back to the loader/MC carried on the plan (CurseForge file metadata).
+        // A downloaded server pack usually has no manifest.json, so this is what lets
+        // the egg switch for official server packs.
+        return [
+            'loader'  => $loader  ?? ($plan['loader']  ?? null),
+            'mc'      => $mc      ?? ($plan['mc']       ?? null),
+            'version' => $version ?? ($plan['version']  ?? null),
+        ];
     }
 
     /**
@@ -825,25 +929,78 @@ class ModpackInstallService
      */
     private function findLoaderEgg(string $loader): ?Egg
     {
+        $best      = null;
+        $bestScore = 0;
+
+        // Pick the *best*-scoring egg rather than the first match, so a generic Forge
+        // egg listed before the NeoForge egg can't win a neoforge lookup.
         foreach (Egg::with('variables')->get() as $egg) {
-            $envs = $egg->variables->pluck('env_variable')->map(fn ($e) => strtoupper((string) $e))->all();
-            $has  = fn (string $n) => in_array($n, $envs, true);
-
-            $match = match ($loader) {
-                'neoforge' => $has('NEOFORGE_VERSION'),
-                'forge'    => $has('FORGE_VERSION') && !$has('NEOFORGE_VERSION') && !$has('SPONGE_TYPE'),
-                'fabric'   => $has('FABRIC_VERSION') || $has('LOADER_VERSION'),
-                default    => false,
-            };
-
-            if ($match) {
-                return $egg;
+            $score = $this->loaderEggScore($egg, $loader);
+            if ($score > $bestScore) {
+                $bestScore = $score;
+                $best      = $egg;
             }
         }
 
-        return null;
+        return $bestScore > 0 ? $best : null;
     }
 
+    /**
+     * Score how well an egg matches a loader. A defining variable is the strongest
+     * signal (3); the egg name is a fallback (2) for eggs that name their version
+     * variable unconventionally. 0 means "not this loader" — crucially a Forge egg
+     * never scores for neoforge (and vice-versa), so a neoforge pack can never fall
+     * back onto the Forge egg.
+     */
+    private function loaderEggScore(Egg $egg, string $loader): int
+    {
+        $envs = $egg->variables->pluck('env_variable')->map(fn ($e) => strtoupper((string) $e))->all();
+        $has  = fn (string $n) => in_array($n, $envs, true);
+
+        $name      = strtolower((string) $egg->name);
+        $isNeoName = (bool) preg_match('/neo[\s_-]*forge/', $name);
+        $isNeoVar  = $has('NEOFORGE_VERSION');
+
+        return match ($loader) {
+            'neoforge' => $isNeoVar ? 3 : ($isNeoName ? 2 : 0),
+            'forge'    => (!$isNeoVar && !$isNeoName && !$has('SPONGE_TYPE'))
+                ? ($has('FORGE_VERSION') ? 3 : (str_contains($name, 'forge') ? 2 : 0))
+                : 0,
+            'fabric'   => ($has('FABRIC_VERSION') || $has('LOADER_VERSION'))
+                ? 3
+                : (str_contains($name, 'fabric') ? 2 : 0),
+            default    => 0,
+        };
+    }
+
+    /**
+     * Import a loader egg bundled with the plugin (resources/eggs/<loader>.json) when the
+     * panel has no matching egg installed. Returns the imported egg, or null if there's no
+     * bundled egg for the loader or the import fails. Best-effort — never throws.
+     */
+    private function importBundledLoaderEgg(ModpackInstall $record, string $loader): ?Egg
+    {
+        $path = dirname(__DIR__, 2) . "/resources/eggs/{$loader}.json";
+        if (!is_file($path)) {
+            return null;
+        }
+
+        try {
+            $record->appendLog("  No {$loader} egg found — importing the bundled “{$loader}” egg…");
+
+            $content = (string) file_get_contents($path);
+            $imported = app(EggImporterService::class)->fromContent($content, EggFormat::JSON);
+
+            $record->appendLog("  Imported egg “{$imported->name}” (id {$imported->id}).");
+
+            // Re-run scoring against all eggs (incl. the freshly imported one) so we pick the
+            // best match by the same rules as everything else.
+            return $this->findLoaderEgg($loader);
+        } catch (Throwable $e) {
+            $record->appendLog('  WARNING: could not import the bundled egg (' . $e->getMessage() . ').');
+            return null;
+        }
+    }
 
     private function javaForMc(?string $mc): int
     {
