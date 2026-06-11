@@ -68,7 +68,7 @@ class ModpackManagerPlugin implements Plugin, HasPluginSettings
                         ->password()
                         ->revealable()
                         ->placeholder('mrp_xxxxxxxx')
-                        ->helperText('Create a token at https://modrinth.com/settings/pat')
+                        ->helperText('Create a token at https://modrinth.com/settings/pats')
                         ->default(fn () => config('modpack-manager.modrinth_token')),
                 ]),
 
