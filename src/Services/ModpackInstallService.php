@@ -210,6 +210,10 @@ class ModpackInstallService
 
         $record->appendLog('Creating a panel backup of the current server…');
 
+        // The user explicitly asked for a backup before we wipe the existing
+        // installation. If we can't produce a successful one, abort instead of
+        // silently destroying their files — installation continues only when a
+        // backup is in hand.
         try {
             $name = 'Before modpack install — ' . $record->modpack_name
                   . ' (' . now()->format('Y-m-d H:i') . ')';
@@ -234,17 +238,37 @@ class ModpackInstallService
             }
 
             if (!$completed) {
-                $record->appendLog('  WARNING: backup did not finish within 15 min — continuing anyway.');
-            } elseif (!$backup->is_successful) {
-                $record->appendLog('  WARNING: backup reported a failure — continuing anyway.');
-            } else {
-                $size = $backup->bytes ? $this->humanBytes((int) $backup->bytes) : 'unknown size';
-                $record->appendLog("  Backup completed successfully ({$size}). It's in the Backups tab.");
+                throw new RuntimeException(
+                    'Backup did not finish within 15 minutes. Aborting so your current installation is left untouched.'
+                );
             }
+
+            if (!$backup->is_successful) {
+                throw new RuntimeException(
+                    'The backup reported a failure. Aborting so your current installation is left untouched.'
+                );
+            }
+
+            $size = $backup->bytes ? $this->humanBytes((int) $backup->bytes) : 'unknown size';
+            $record->appendLog("  Backup completed successfully ({$size}). It's in the Backups tab.");
         } catch (\App\Exceptions\Service\Backup\TooManyBackupsException) {
-            $record->appendLog('  WARNING: server backup limit reached — skipping backup. Free a slot or raise the limit.');
+            $record->markStepFailed('create_backup');
+            throw new RuntimeException(
+                'Server backup limit reached — the requested backup could not be created. '
+                . 'Free a slot or raise the limit, then try again. Your current installation was left untouched.'
+            );
+        } catch (RuntimeException $e) {
+            // Already a clear, user-facing message from the checks above.
+            $record->markStepFailed('create_backup');
+            throw $e;
         } catch (Throwable $e) {
-            $record->appendLog('  WARNING: backup skipped (' . $e->getMessage() . ')');
+            $record->markStepFailed('create_backup');
+            throw new RuntimeException(
+                'The requested backup could not be created (' . $e->getMessage()
+                . '). Aborting so your current installation is left untouched.',
+                0,
+                $e
+            );
         }
 
         $record->update(['progress' => 16]);
@@ -1040,14 +1064,21 @@ class ModpackInstallService
         $isNeoName = (bool) preg_match('/neo[\s_-]*forge/', $name);
         $isNeoVar  = $has('NEOFORGE_VERSION');
 
+        // Match a loader keyword only as a WHOLE WORD, so an unrelated egg whose name merely
+        // contains the substring can't masquerade as a loader egg. The classic offender is
+        // "Arma Reforger" → "re·forge·r" contains "forge" but is not the Forge loader; a bare
+        // str_contains() let it score as a Forge fallback whenever no real Forge egg was
+        // installed. \bforge\b matches "Forge Minecraft" / "Minecraft Forge" but not "reforger".
+        $nameMentions = fn (string $kw) => (bool) preg_match('/\b' . preg_quote($kw, '/') . '\b/', $name);
+
         return match ($loader) {
             'neoforge' => $isNeoVar ? 3 : ($isNeoName ? 2 : 0),
             'forge'    => (!$isNeoVar && !$isNeoName && !$has('SPONGE_TYPE'))
-                ? ($has('FORGE_VERSION') ? 3 : (str_contains($name, 'forge') ? 2 : 0))
+                ? ($has('FORGE_VERSION') ? 3 : ($nameMentions('forge') ? 2 : 0))
                 : 0,
             'fabric'   => ($has('FABRIC_VERSION') || $has('LOADER_VERSION'))
                 ? 3
-                : (str_contains($name, 'fabric') ? 2 : 0),
+                : ($nameMentions('fabric') ? 2 : 0),
             default    => 0,
         };
     }

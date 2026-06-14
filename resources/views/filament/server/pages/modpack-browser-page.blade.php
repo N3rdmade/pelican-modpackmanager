@@ -305,6 +305,13 @@
     .mpm-modal__actions .mpm-btn--install,
     .mpm-modal__actions .mpm-btn--update { flex:1; }
 
+    .mpm-modal__link-existing { margin-top:12px; padding-top:12px; border-top:1px solid var(--mpm-border); text-align:center; }
+    .mpm-link-existing { background:none; border:none; padding:0; cursor:pointer; font-size:.85rem; font-weight:600;
+        color:var(--mpm-primary); text-decoration:underline; text-underline-offset:2px; }
+    .mpm-link-existing:hover:not(:disabled) { color:var(--mpm-text); }
+    .mpm-link-existing:disabled { opacity:.5; cursor:not-allowed; text-decoration:none; }
+    .mpm-link-existing__hint { display:block; margin-top:4px; font-size:.75rem; color:var(--mpm-muted); }
+
     @media (max-width:640px){ .mpm-grid { grid-template-columns:1fr; } .mpm-input { min-width:0; } }
 </style>
 
@@ -732,7 +739,7 @@
                             </label>
 
                             <div class="mpm-modal__actions">
-                                <button type="button" wire:click="startInstall" wire:loading.attr="disabled" wire:target="startInstall"
+                                <button type="button" wire:click="startInstall" wire:loading.attr="disabled" wire:target="startInstall,linkInstalled"
                                         class="mpm-btn {{ $isUpd ? 'mpm-btn--update' : 'mpm-btn--install' }}"
                                         @if($versionsLoading || empty($versions)) disabled @endif>
                                     <span wire:loading.remove wire:target="startInstall">{{ $isUpd ? 'Submit Update' : $actionLabel }}</span>
@@ -741,6 +748,20 @@
                                     </span>
                                 </button>
                                 <button type="button" class="mpm-btn mpm-btn--ghost" wire:click="closeModal">Cancel</button>
+                            </div>
+
+                            {{-- Non-destructive recovery: register a pack you already have installed
+                                 (e.g. an install record was lost) without wiping/re-downloading files. --}}
+                            <div class="mpm-modal__link-existing">
+                                <button type="button" wire:click="linkInstalled" wire:loading.attr="disabled" wire:target="startInstall,linkInstalled"
+                                        class="mpm-link-existing"
+                                        @if($versionsLoading || empty($versions)) disabled @endif>
+                                    <span wire:loading.remove wire:target="linkInstalled">Already installed? Link this version without reinstalling</span>
+                                    <span wire:loading wire:target="linkInstalled">
+                                        <svg class="mpm-spin" style="width:13px;height:13px;vertical-align:-2px;margin-right:6px;" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>Linking…
+                                    </span>
+                                </button>
+                                <span class="mpm-link-existing__hint">Marks this pack as installed for the banner &amp; update checks. No files are changed.</span>
                             </div>
                         </div>
                     @else

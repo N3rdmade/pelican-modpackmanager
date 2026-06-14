@@ -8,6 +8,13 @@ return new class extends Migration
 {
     public function up(): void
     {
+        // Idempotent: a plugin re-install must never wipe a server's recorded modpack.
+        // If the table already exists from a previous install, keep it (and its history)
+        // untouched rather than failing on a duplicate CREATE.
+        if (Schema::hasTable('modpack_installs')) {
+            return;
+        }
+
         Schema::create('modpack_installs', function (Blueprint $table) {
             $table->id();
             $table->unsignedInteger('server_id')->index();
@@ -32,6 +39,9 @@ return new class extends Migration
 
     public function down(): void
     {
-        Schema::dropIfExists('modpack_installs');
+        // Intentionally NOT dropping the table. This table is the plugin's persistent
+        // memory of which modpack each server is running; preserving it across an
+        // uninstall / re-install is the whole point. To purge it deliberately, drop it
+        // by hand:  Schema::dropIfExists('modpack_installs');
     }
 };

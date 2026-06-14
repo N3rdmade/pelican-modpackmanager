@@ -400,6 +400,61 @@ class ModpackBrowserPage extends Page
     }
 
     /**
+     * Register an already-installed modpack as this server's current install WITHOUT
+     * touching any files or dispatching the installer.
+     *
+     * Use this to restore the installed-pack banner + update tracking when there is no
+     * record — e.g. the pack was installed before this plugin existed, was set up
+     * manually, or an install record was lost (a plugin re-install on an older version
+     * used to drop the records table). Completely non-destructive: it only writes a
+     * `status = installed` row from the modpack + version the user picks in the modal.
+     */
+    public function linkInstalled(): void
+    {
+        $this->authorizeManage();
+
+        if (!$this->selectedModpack || !$this->selectedVersion) {
+            Notification::make()->title('Please select the version you currently have installed.')->warning()->send();
+            return;
+        }
+
+        $server       = $this->getServer();
+        $provider     = $this->selectedModpack['provider'];
+        $versionLabel = $this->getVersionLabel($provider, $this->selectedVersion);
+        $modpackName  = $this->selectedModpack['name'];
+
+        // Mark every step done so the record reads as a completed install if it's ever
+        // rendered in the step view.
+        $steps = array_map(
+            fn () => ModpackInstall::STEP_DONE,
+            (new ModpackInstall())->buildInitialSteps()
+        );
+
+        $record = ModpackInstall::create([
+            'server_id'        => $server->id,
+            'provider'         => $provider,
+            'modpack_id'       => (string) $this->selectedModpack['id'],
+            'modpack_name'     => $modpackName,
+            'modpack_version'  => $versionLabel,
+            'modpack_icon_url' => $this->selectedModpack['iconUrl'] ?? null,
+            'status'           => 'installed',
+            'steps'            => $steps,
+            'progress'         => 100,
+            'debug_log'        => ['[' . now()->format('H:i:s') . '] Linked as already-installed — no files were changed.'],
+        ]);
+
+        $this->closeModal();
+
+        $this->applyInstalledInfo($record);
+
+        Notification::make()
+            ->title("Linked “{$modpackName}” {$versionLabel} as installed.")
+            ->body('No files were changed. The installed-pack banner and update checks now track this pack.')
+            ->success()
+            ->send();
+    }
+
+    /**
      * Polled every 2 seconds while installing to update the UI.
      * Called via wire:poll in the Blade view.
      */
