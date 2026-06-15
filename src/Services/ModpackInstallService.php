@@ -470,11 +470,36 @@ class ModpackInstallService
             // Non-fatal.
         }
 
+        $this->writeInstalledMetadata($record);
+
         Cache::forget("modpack-manager:config:{$record->id}");
 
         $record->update(['progress' => 98]);
         $record->markStepDone('finalize');
         $record->appendLog('Done.');
+    }
+
+    /**
+     * When `store_metadata` is enabled, persist the installed-pack info into the
+     * server's own files (a dotfile in the server root) so the Modpacks page can
+     * recover the current pack even if the database record is lost. Best-effort:
+     * a write failure never fails the install.
+     */
+    private function writeInstalledMetadata(ModpackInstall $record): void
+    {
+        if (!config('modpack-manager.store_metadata', false)) {
+            return;
+        }
+
+        try {
+            $this->fileRepo->putContent(
+                ModpackInstall::METADATA_FILE,
+                (string) json_encode($record->toMetadata(), JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES)
+            );
+            $record->appendLog('  Wrote installed-pack metadata to ' . ModpackInstall::METADATA_FILE . '.');
+        } catch (Throwable $e) {
+            $record->appendLog('  Could not write metadata file (non-fatal): ' . $e->getMessage());
+        }
     }
 
     /**

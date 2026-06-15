@@ -56,6 +56,48 @@ class ModpackInstall extends Model
         'update_checked_at' => 'datetime',
     ];
 
+    /**
+     * Path (relative to the server root) of the optional metadata file written
+     * into each server's own files when `store_metadata` is enabled. Lets the
+     * Modpacks page recover the current pack when no DB record exists.
+     */
+    public const METADATA_FILE = '/.modpack-manager.json';
+
+    /**
+     * Build the JSON payload describing this install for the on-disk metadata file.
+     *
+     * @return array<string, mixed>
+     */
+    public function toMetadata(): array
+    {
+        return [
+            'managed_by'   => 'modpack-manager',
+            'provider'     => $this->provider,
+            'modpack_id'   => $this->modpack_id,
+            'name'         => $this->modpack_name,
+            'version'      => $this->modpack_version,
+            'icon_url'     => $this->modpack_icon_url,
+            'installed_at' => now()->toIso8601String(),
+        ];
+    }
+
+    /**
+     * Build a transient (unsaved) install record from a decoded metadata payload,
+     * for driving the installed-pack banner + update check when there is no DB row.
+     */
+    public static function fromMetadata(int $serverId, array $meta): self
+    {
+        return new self([
+            'server_id'        => $serverId,
+            'provider'         => (string) ($meta['provider'] ?? ''),
+            'modpack_id'       => (string) ($meta['modpack_id'] ?? ''),
+            'modpack_name'     => (string) ($meta['name'] ?? 'Installed modpack'),
+            'modpack_version'  => $meta['version'] ?? null,
+            'modpack_icon_url' => $meta['icon_url'] ?? null,
+            'status'           => 'installed',
+        ]);
+    }
+
     // ─── Step definitions ─────────────────────────────────────────────────────
 
     public const STEPS = [

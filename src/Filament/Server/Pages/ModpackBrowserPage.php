@@ -4,6 +4,7 @@ namespace Cosmii02\ModpackManager\Filament\Server\Pages;
 
 use App\Enums\SubuserPermission;
 use App\Models\Server;
+use App\Repositories\Daemon\DaemonFileRepository;
 use Cosmii02\ModpackManager\Jobs\InstallModpackJob;
 use Cosmii02\ModpackManager\Models\ModpackInstall;
 use Cosmii02\ModpackManager\Services\ATLauncherService;
@@ -176,6 +177,13 @@ class ModpackBrowserPage extends Page
             } elseif ($latest->status === 'installed') {
                 $this->applyInstalledInfo($latest);
             }
+        }
+
+        // No usable DB record? When the admin has enabled file-backed metadata,
+        // recover the current pack from the server's own .modpack-manager.json so
+        // the banner + update tracking survive lost install records.
+        if (!$this->installedModpack && !$this->isInstalling && config('modpack-manager.store_metadata', false)) {
+            $this->loadInstalledFromMetadata($server);
         }
 
         // Pre-load popular modpacks (skip if an install is already running)
@@ -443,6 +451,9 @@ class ModpackBrowserPage extends Page
             'debug_log'        => ['[' . now()->format('H:i:s') . '] Linked as already-installed — no files were changed.'],
         ]);
 
+        // Mirror the link into the server's files when file-backed metadata is on.
+        $this->writeInstalledMetadata($server, $record);
+
         $this->closeModal();
 
         $this->applyInstalledInfo($record);
@@ -585,6 +596,53 @@ class ModpackBrowserPage extends Page
         ]);
         $record->appendLog('Auto-failed: no progress for over ' . (self::STALE_AFTER_SECONDS / 60) . ' minutes.');
         \Illuminate\Support\Facades\Cache::forget("modpack-manager:install-spec:{$record->id}");
+    }
+
+    /**
+     * Recover the installed-pack banner from the server's on-disk metadata file
+     * (written when `store_metadata` is enabled). Builds a transient, unsaved
+     * record purely to drive the banner + update check. Silent on any failure
+     * (missing file, malformed JSON, daemon unreachable).
+     */
+    private function loadInstalledFromMetadata(Server $server): void
+    {
+        try {
+            $repo = app(DaemonFileRepository::class);
+            $repo->setServer($server);
+            $raw = $repo->getContent(ModpackInstall::METADATA_FILE, 64 * 1024);
+        } catch (Throwable) {
+            return;
+        }
+
+        $meta = json_decode((string) $raw, true);
+
+        if (!is_array($meta) || empty($meta['provider']) || empty($meta['modpack_id'])) {
+            return;
+        }
+
+        $this->applyInstalledInfo(ModpackInstall::fromMetadata($server->id, $meta));
+    }
+
+    /**
+     * Best-effort write of the on-disk metadata file outside the installer
+     * (e.g. when linking an already-installed pack), gated on `store_metadata`.
+     */
+    private function writeInstalledMetadata(Server $server, ModpackInstall $record): void
+    {
+        if (!config('modpack-manager.store_metadata', false)) {
+            return;
+        }
+
+        try {
+            $repo = app(DaemonFileRepository::class);
+            $repo->setServer($server);
+            $repo->putContent(
+                ModpackInstall::METADATA_FILE,
+                (string) json_encode($record->toMetadata(), JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES)
+            );
+        } catch (Throwable $e) {
+            Log::warning('[ModpackManager] Could not write metadata file on link', ['error' => $e->getMessage()]);
+        }
     }
 
     /**

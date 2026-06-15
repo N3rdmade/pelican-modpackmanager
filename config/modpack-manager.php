@@ -24,6 +24,12 @@ return [
         'usercache.json',
     ],
 
+    // When enabled, the installer writes a small .modpack-manager.json file into
+    // each server's own files after a successful install, and the Modpacks page
+    // reads it to recover the "currently installed" pack when no database record
+    // exists (e.g. records lost on a plugin re-install). Disabled by default.
+    'store_metadata' => filter_var(env('MODPACK_MANAGER_STORE_METADATA', false), FILTER_VALIDATE_BOOLEAN),
+
     // Max download size in MB before job times out
     'download_timeout' => 300,
 

@@ -7,6 +7,7 @@ use App\Traits\EnvironmentWriterTrait;
 use Filament\Contracts\Plugin;
 use Filament\Forms\Components\TagsInput;
 use Filament\Forms\Components\TextInput;
+use Filament\Forms\Components\Toggle;
 use Filament\Forms\Components\Placeholder;
 use Filament\Schemas\Components\Section;
 use Filament\Notifications\Notification;
@@ -82,6 +83,15 @@ class ModpackManagerPlugin implements Plugin, HasPluginSettings
                         ->default(fn () => config('modpack-manager.required_egg_tags')),
                 ]),
 
+            Section::make('Installed-pack tracking')
+                ->description('Optionally record the installed modpack inside each server\'s own files so the current pack survives database resets and panel re-installs.')
+                ->schema([
+                    Toggle::make('store_metadata')
+                        ->label('Store modpack info in server files')
+                        ->helperText('Writes a .modpack-manager.json file to each server after install. The Modpacks page reads it to recover the current pack when no install record exists. Off by default.')
+                        ->default(fn () => (bool) config('modpack-manager.store_metadata')),
+                ]),
+
             Section::make('About')
                 ->schema([
                     Placeholder::make('info')
@@ -110,6 +120,10 @@ class ModpackManagerPlugin implements Plugin, HasPluginSettings
                 fn ($t) => $t !== ''
             ));
             $values['MODPACK_MANAGER_EGG_TAGS'] = implode(',', $tags);
+        }
+
+        if (array_key_exists('store_metadata', $data)) {
+            $values['MODPACK_MANAGER_STORE_METADATA'] = $data['store_metadata'] ? 'true' : 'false';
         }
 
         $this->writeToEnvironment($values);

@@ -247,6 +247,30 @@ disables the filter (page shows on every server). Enforced in `canAccess()`
 `config:cache`d panel the new value takes effect after the config cache is
 refreshed (same as the API-key settings).
 
+## File-backed installed-pack metadata (`store_metadata`)
+
+By default the "currently installed" pack is tracked **only** in the
+`modpack_installs` table, so the banner + update tracking are lost if those
+records disappear (e.g. a plugin re-install dropped the table on older versions —
+the reason the manual *Link existing* button exists).
+
+When the admin enables **Plugin settings → Installed-pack tracking** (the
+`store_metadata` toggle, persisted to `MODPACK_MANAGER_STORE_METADATA=true|false`,
+parsed into `config('modpack-manager.store_metadata')`, **off by default**):
+
+- **Write** — after a successful install, `stepFinalize()` calls
+  `writeInstalledMetadata()` which puts `ModpackInstall::toMetadata()` (provider,
+  modpack id, name, version, icon, `installed_at`) as pretty JSON to
+  `ModpackInstall::METADATA_FILE` = `/.modpack-manager.json` in the server root.
+  `linkInstalled()` mirrors the same write so a manual link also persists to disk.
+  Best-effort: a daemon/write failure logs but never fails the install.
+- **Read** — `ModpackBrowserPage::mount()`, only when no usable DB record was
+  found and the toggle is on, calls `loadInstalledFromMetadata()` which reads the
+  file via `DaemonFileRepository`, decodes it, and builds a **transient (unsaved)**
+  `ModpackInstall::fromMetadata()` to drive the banner + `computeUpdateState()`.
+- The dotfile lives in the server root and isn't in any cleanup list, so it
+  survives reinstalls and is simply overwritten by the next install.
+
 ## Permission gate
 
 The Modpacks page is gated on a Pelican subuser permission so it isn't exposed
