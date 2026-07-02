@@ -320,6 +320,7 @@
     x-data="{
         showDebug: false,
         modalOpen: @entangle('showModal'),
+        lastLogOpen: @entangle('showLastLog'),
         autoScroll: true,
         scrollDebugToBottom() {
             if (!this.autoScroll) return;
@@ -489,6 +490,14 @@
                 <div>
                     <h2 class="mpm-title">Modpack Browser</h2>
                     <p class="mpm-sub">Browse and install modpacks from CurseForge, Modrinth, FTB &amp; ATLauncher.</p>
+                    @if($hasLastLog)
+                        <button type="button" wire:click="showLastInstallLog"
+                                class="mpm-btn mpm-btn--ghost"
+                                style="margin-top:11px;height:auto;padding:7px 12px;font-size:.78rem;">
+                            <svg fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+                            Show last install log
+                        </button>
+                    @endif
                 </div>
                 <div>
                     <div class="mpm-search">
@@ -771,6 +780,40 @@
                     @endif
                 </div>
             </div>
+
+    {{-- ══════════════ LAST INSTALL LOG MODAL ══════════════ --}}
+    <div class="mpm-overlay" x-show="lastLogOpen" x-cloak x-transition.opacity
+         @keydown.escape.window="$wire.hideLastInstallLog()" @click.self="$wire.hideLastInstallLog()">
+        <div class="mpm-modal" x-show="lastLogOpen" x-transition>
+            <div class="mpm-modal__head">
+                <div style="min-width:0;">
+                    <h3 class="mpm-modal__title">Last Install Log</h3>
+                    @if(!empty($lastLogMeta))
+                        @php
+                            $llStatus = $lastLogMeta['status'] ?? '';
+                            $llColor  = $llStatus === 'failed' ? 'var(--mpm-danger)' : 'var(--mpm-success)';
+                        @endphp
+                        <p class="mpm-sub" style="margin-top:3px;">
+                            {{ $lastLogMeta['name'] ?? 'Modpack' }}@if(!empty($lastLogMeta['version'])) · {{ $lastLogMeta['version'] }}@endif
+                            — <span style="color:{{ $llColor }};font-weight:600;">{{ ucfirst($llStatus) }}</span>@if(!empty($lastLogMeta['time'])) · {{ $lastLogMeta['time'] }}@endif
+                        </p>
+                    @endif
+                </div>
+                <button type="button" class="mpm-modal__close" wire:click="hideLastInstallLog">
+                    <svg fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+                </button>
+            </div>
+            <div class="mpm-modal__body">
+                <div class="mpm-debug" style="height:360px;margin-top:0;">
+                    @forelse($lastLog as $line)
+                        <div>{{ $line }}</div>
+                    @empty
+                        <div class="muted">No log output was recorded for the last install.</div>
+                    @endforelse
+                </div>
+            </div>
+        </div>
+    </div>
 
 </div>
 </div>

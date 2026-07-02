@@ -86,6 +86,12 @@ class ModpackBrowserPage extends Page
     public bool    $updateAvailable    = false;
     public ?string $latestVersionLabel = null;
 
+    // Last install log viewer (browser view)
+    public bool  $hasLastLog   = false;   // whether a finished install log exists to show
+    public bool  $showLastLog  = false;   // drives the log modal
+    public array $lastLog      = [];      // the log lines of the most recent finished install
+    public array $lastLogMeta  = [];      // ['name', 'version', 'status', 'time']
+
     // Whether the current user may install/update (drives the UI; enforced server-side too).
     public bool $canManage = false;
 
@@ -148,6 +154,11 @@ class ModpackBrowserPage extends Page
         $server = $this->getServer();
 
         $this->canManage = $this->userCanManage();
+
+        // Is there a finished install whose log we can offer via "Show last install log"?
+        $this->hasLastLog = ModpackInstall::where('server_id', $server->id)
+            ->whereIn('status', ['installed', 'failed'])
+            ->exists();
 
         // Check for any existing installation record
         $latest = ModpackInstall::where('server_id', $server->id)
@@ -559,6 +570,37 @@ class ModpackBrowserPage extends Page
         if (empty($this->modpacks)) {
             $this->loadModpacks();
         }
+    }
+
+    /**
+     * Load the most recent finished (installed/failed) install's debug log and
+     * open the log modal. Backs the "Show last install log" button.
+     */
+    public function showLastInstallLog(): void
+    {
+        $record = ModpackInstall::where('server_id', $this->getServer()->id)
+            ->whereIn('status', ['installed', 'failed'])
+            ->orderByDesc('id')
+            ->first();
+
+        if (!$record) {
+            Notification::make()->title('No previous install log found.')->info()->send();
+            return;
+        }
+
+        $this->lastLog = $record->debug_log ?? [];
+        $this->lastLogMeta = [
+            'name'    => $record->modpack_name,
+            'version' => $record->modpack_version,
+            'status'  => $record->status,
+            'time'    => $record->updated_at?->diffForHumans(),
+        ];
+        $this->showLastLog = true;
+    }
+
+    public function hideLastInstallLog(): void
+    {
+        $this->showLastLog = false;
     }
 
     // ─── Helpers ──────────────────────────────────────────────────────────────
