@@ -169,6 +169,20 @@ class ModpackInstallService
             return ['mode' => 'server_pack', 'archiveUrl' => $cf->getDownloadUrl($modId, $serverPackId), 'loader' => $cfLoader, 'mc' => $cfMc, 'version' => null];
         }
 
+        if ($serverPack = $cf->findServerPackForFile($modId, $fileId, $file)) {
+            ['loader' => $serverLoader, 'mc' => $serverMc] = $this->cfLoaderMeta($serverPack['gameVersions'] ?? []);
+            $serverPackId = (int) $serverPack['id'];
+            $record->appendLog("Official server pack found as an additional file (#{$serverPackId}) — using it.");
+
+            return [
+                'mode'       => 'server_pack',
+                'archiveUrl' => $cf->getDownloadUrl($modId, $serverPackId),
+                'loader'     => $cfLoader ?: $serverLoader,
+                'mc'         => $cfMc ?: $serverMc,
+                'version'    => null,
+            ];
+        }
+
         $record->appendLog('No official server pack available — building one from the client pack.');
         return ['mode' => 'curseforge_build', 'archiveUrl' => $cf->getDownloadUrl($modId, $fileId), 'loader' => $cfLoader, 'mc' => $cfMc, 'version' => null];
     }

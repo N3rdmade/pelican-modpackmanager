@@ -6,6 +6,7 @@ use Illuminate\Http\Client\PendingRequest;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use RuntimeException;
+use Throwable;
 
 class CurseForgeService
 {
@@ -91,16 +92,10 @@ class CurseForgeService
         // Newest first.
         usort($files, fn ($a, $b) => strcmp($b['fileDate'] ?? '', $a['fileDate'] ?? ''));
 
-        return array_values(array_map(fn (array $file) => [
-            'id'               => $file['id'],
-            'displayName'      => $file['displayName'] ?? $file['fileName'] ?? ('File ' . $file['id']),
-            'fileName'         => $file['fileName'] ?? '',
-            'fileDate'         => $file['fileDate'] ?? null,
-            'fileLength'       => $file['fileLength'] ?? 0,
-            'isServerPack'     => $file['isServerPack'] ?? false,
-            'serverPackFileId' => $file['serverPackFileId'] ?? null,
-            'gameVersions'     => $file['gameVersions'] ?? [],
-        ], array_slice($files, 0, 40)));
+        return array_values(array_map(
+            fn (array $file) => $this->normalizeFile($file),
+            array_slice($files, 0, 40)
+        ));
     }
 
     /**
@@ -118,15 +113,55 @@ class CurseForgeService
 
         $f = $response->json('data', []);
 
-        return [
-            'id'               => (int) ($f['id'] ?? $fileId),
-            'fileName'         => $f['fileName'] ?? null,
-            'downloadUrl'      => $f['downloadUrl'] ?? null,
-            'isServerPack'     => (bool) ($f['isServerPack'] ?? false),
-            'serverPackFileId' => $f['serverPackFileId'] ?? null,
-            // Mix of MC versions and loader names, e.g. ["1.20.1", "NeoForge"].
-            'gameVersions'     => $f['gameVersions'] ?? [],
-        ];
+        return $this->normalizeFile($f + ['id' => $fileId]);
+    }
+
+    /**
+     * Find a server pack uploaded as an additional file for the selected client
+     * pack. Some CurseForge projects don't populate serverPackFileId on the
+     * client file. Depending on the project, the server file may show up through
+     * alternateFileId, a listed parent/alternate relationship, or only on the
+     * public "Additional Files" page.
+     *
+     * @return array|null
+     */
+    public function findServerPackForFile(int $modId, int $clientFileId, ?array $clientFile = null): ?array
+    {
+        if (!empty($clientFile['alternateFileId'])) {
+            $serverPack = $this->getLinkedServerPack($modId, (int) $clientFile['alternateFileId']);
+
+            if ($serverPack) {
+                return $serverPack;
+            }
+        }
+
+        $response = $this->client->get("/mods/{$modId}/files", [
+            'pageSize' => 50,
+        ]);
+
+        if ($response->failed()) {
+            Log::warning('[ModpackManager] CurseForge server-pack lookup failed', [
+                'mod_id' => $modId,
+                'file_id' => $clientFileId,
+                'status' => $response->status(),
+            ]);
+            return $this->findServerPackFromAdditionalFilesPage($modId, $clientFileId);
+        }
+
+        foreach ($response->json('data', []) as $file) {
+            if (!$this->looksLikeServerPack($file)) {
+                continue;
+            }
+
+            $parentId = (int) ($file['parentProjectFileId'] ?? 0);
+            $alternateId = (int) ($file['alternateFileId'] ?? 0);
+
+            if ($parentId === $clientFileId || $alternateId === $clientFileId) {
+                return $this->normalizeFile($file);
+            }
+        }
+
+        return $this->findServerPackFromAdditionalFilesPage($modId, $clientFileId);
     }
 
     /**
@@ -257,6 +292,111 @@ class CurseForgeService
             'loaders'       => $this->extractLoaders($mod['latestFilesIndexes'] ?? []),
             'latestFileId'  => $mod['mainFileId'] ?? null,
         ];
+    }
+
+    private function normalizeFile(array $file): array
+    {
+        $id = (int) ($file['id'] ?? 0);
+
+        return [
+            'id'                  => $id,
+            'displayName'         => $file['displayName'] ?? $file['fileName'] ?? ($id ? 'File ' . $id : 'File'),
+            'fileName'            => $file['fileName'] ?? null,
+            'downloadUrl'         => $file['downloadUrl'] ?? null,
+            'fileDate'            => $file['fileDate'] ?? null,
+            'fileLength'          => $file['fileLength'] ?? 0,
+            'isServerPack'        => (bool) ($file['isServerPack'] ?? false),
+            'serverPackFileId'    => $file['serverPackFileId'] ?? null,
+            'parentProjectFileId' => $file['parentProjectFileId'] ?? null,
+            'alternateFileId'     => $file['alternateFileId'] ?? null,
+            // Mix of MC versions and loader names, e.g. ["1.20.1", "NeoForge"].
+            'gameVersions'        => $file['gameVersions'] ?? [],
+        ];
+    }
+
+    private function getLinkedServerPack(int $modId, int $fileId): ?array
+    {
+        try {
+            $file = $this->getFile($modId, $fileId);
+        } catch (Throwable $e) {
+            Log::info('[ModpackManager] CurseForge linked server-pack lookup skipped', [
+                'mod_id' => $modId,
+                'file_id' => $fileId,
+                'error' => $e->getMessage(),
+            ]);
+            return null;
+        }
+
+        return $this->looksLikeServerPack($file) ? $file : null;
+    }
+
+    private function findServerPackFromAdditionalFilesPage(int $modId, int $clientFileId): ?array
+    {
+        try {
+            $slug = $this->getMod($modId)['slug'] ?? null;
+        } catch (Throwable $e) {
+            Log::info('[ModpackManager] CurseForge additional-files page lookup skipped', [
+                'mod_id' => $modId,
+                'file_id' => $clientFileId,
+                'error' => $e->getMessage(),
+            ]);
+            return null;
+        }
+
+        if (!$slug) {
+            return null;
+        }
+
+        $url = "https://www.curseforge.com/minecraft/modpacks/{$slug}/files/{$clientFileId}/additional-files";
+
+        try {
+            $response = Http::timeout(20)->accept('text/html')->get($url);
+        } catch (Throwable $e) {
+            Log::info('[ModpackManager] CurseForge additional-files page lookup skipped', [
+                'mod_id' => $modId,
+                'file_id' => $clientFileId,
+                'error' => $e->getMessage(),
+            ]);
+            return null;
+        }
+
+        if ($response->failed()) {
+            Log::info('[ModpackManager] CurseForge additional-files page lookup failed', [
+                'mod_id' => $modId,
+                'file_id' => $clientFileId,
+                'status' => $response->status(),
+            ]);
+            return null;
+        }
+
+        preg_match_all('#/minecraft/modpacks/[^"\']+/files/(\d+)#', $response->body(), $matches);
+
+        $candidateIds = array_values(array_unique(array_filter(
+            array_map('intval', $matches[1] ?? []),
+            fn (int $id) => $id > 0 && $id !== $clientFileId
+        )));
+
+        foreach ($candidateIds as $candidateId) {
+            $serverPack = $this->getLinkedServerPack($modId, $candidateId);
+
+            if ($serverPack) {
+                return $serverPack;
+            }
+        }
+
+        return null;
+    }
+
+    private function looksLikeServerPack(array $file): bool
+    {
+        if (!empty($file['isServerPack'])) {
+            return true;
+        }
+
+        $name = strtolower((string) ($file['displayName'] ?? $file['fileName'] ?? ''));
+
+        return $name !== ''
+            && (str_contains($name, 'server') || str_contains($name, 'serverpack') || str_contains($name, 'server pack'));
     }
 
     /**
