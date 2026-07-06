@@ -33,6 +33,10 @@ return [
     // Max download size in MB before job times out
     'download_timeout' => 300,
 
+    // Wings limits each server to 3 simultaneous remote downloads by default.
+    // Keep this at or below that limit unless your Wings config is higher.
+    'remote_download_concurrency' => max(1, (int) env('MODPACK_MANAGER_REMOTE_DOWNLOAD_CONCURRENCY', 3)),
+
     // ─── Scheduled update checks ───────────────────────────────────────────────
     // Periodically check installed modpacks for newer versions and notify the
     // server owner (panel bell) when a new version first appears.

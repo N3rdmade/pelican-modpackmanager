@@ -33,6 +33,7 @@ use Throwable;
 class ModpackInstallService
 {
     private const ARCHIVE_NAME = 'modpack-download.zip';
+    private const DEFAULT_REMOTE_DOWNLOAD_CONCURRENCY = 3;
 
     public function __construct(
         private DaemonFileRepository $fileRepo
@@ -1182,7 +1183,7 @@ class ModpackInstallService
             $record->appendLog('  NOTE: could not resolve project types (' . $e->getMessage() . ') — placing everything in /mods.');
         }
 
-        $expected    = [];
+        $downloads   = [];
         $createdDirs  = ['/mods' => true];
         $folderCounts = [];
         foreach ($manifest['files'] as $f) {
@@ -1211,14 +1212,13 @@ class ModpackInstallService
                 $createdDirs[$remoteDir] = true;
             }
 
-            $this->fileRepo->pull($url, $remoteDir, ['filename' => $name, 'foreground' => false]);
-            $expected[] = ['dir' => $remoteDir, 'name' => $name];
+            $downloads[] = ['url' => $url, 'dir' => $remoteDir, 'name' => $name];
             $folderCounts[$folder] = ($folderCounts[$folder] ?? 0) + 1;
         }
 
         $breakdown = implode(', ', array_map(fn ($d, $n) => "{$n} → {$d}/", array_keys($folderCounts), $folderCounts));
-        $record->appendLog('  Queued ' . count($expected) . ' downloads on Wings' . ($breakdown ? " ({$breakdown})" : '') . '…');
-        $this->waitForFiles($record, $expected);
+        $record->appendLog('  Prepared ' . count($downloads) . ' downloads for Wings' . ($breakdown ? " ({$breakdown})" : '') . '…');
+        $this->pullFilesThrottled($record, $downloads);
 
         $note = "Assembled from a CurseForge CLIENT pack by Modpack Manager.\n"
               . "Minecraft version: {$mcVer}\nMod loader: {$loader}\n\n"
@@ -1240,7 +1240,7 @@ class ModpackInstallService
         $deps = $index['dependencies'] ?? [];
         $record->appendLog('  Dependencies: ' . json_encode($deps));
 
-        $expected   = [];
+        $downloads  = [];
         $createdDirs = [];
         foreach ($index['files'] as $f) {
             if (($f['env']['server'] ?? 'required') === 'unsupported') {
@@ -1262,12 +1262,11 @@ class ModpackInstallService
                 $createdDirs[$remoteDir] = true;
             }
 
-            $this->fileRepo->pull($url, $remoteDir, ['filename' => $name, 'foreground' => false]);
-            $expected[] = ['dir' => $remoteDir, 'name' => $name];
+            $downloads[] = ['url' => $url, 'dir' => $remoteDir, 'name' => $name];
         }
 
-        $record->appendLog('  Queued ' . count($expected) . ' file downloads on Wings…');
-        $this->waitForFiles($record, $expected);
+        $record->appendLog('  Prepared ' . count($downloads) . ' file downloads for Wings…');
+        $this->pullFilesThrottled($record, $downloads);
 
         $note = "Installed from a Modrinth .mrpack by Modpack Manager.\n"
               . 'Dependencies: ' . json_encode($deps) . "\n\n"
@@ -1306,7 +1305,7 @@ class ModpackInstallService
             }
         }
 
-        $expected   = [];
+        $downloads  = [];
         $createdDirs = [];
         $skipped    = 0;
         foreach ($files as $f) {
@@ -1337,12 +1336,11 @@ class ModpackInstallService
                 $createdDirs[$remoteDir] = true;
             }
 
-            $this->fileRepo->pull($url, $remoteDir, ['filename' => $name, 'foreground' => false]);
-            $expected[] = ['dir' => $remoteDir, 'name' => $name];
+            $downloads[] = ['url' => $url, 'dir' => $remoteDir, 'name' => $name];
         }
 
-        $record->appendLog('  Queued ' . count($expected) . ' file downloads on Wings…' . ($skipped ? " ({$skipped} skipped — no resolvable URL)" : ''));
-        $this->waitForFiles($record, $expected);
+        $record->appendLog('  Prepared ' . count($downloads) . ' file downloads for Wings…' . ($skipped ? " ({$skipped} skipped — no resolvable URL)" : ''));
+        $this->pullFilesThrottled($record, $downloads);
 
         $note = "Installed from an FTB (modpacks.ch) pack by Modpack Manager.\n"
               . 'Minecraft: ' . ($plan['mc'] ?? 'unknown') . ' / loader: ' . ($plan['loader'] ?? 'unknown') . ' ' . ($plan['version'] ?? '') . "\n\n"
@@ -1364,15 +1362,14 @@ class ModpackInstallService
 
         try { $this->fileRepo->createDirectory('mods', '/'); } catch (Throwable) {}
 
-        $expected = [];
+        $downloads = [];
         foreach ($files as $f) {
             $remoteDir = '/' . trim((string) ($f['dir'] ?? 'mods'), '/');
-            $this->fileRepo->pull($f['url'], $remoteDir, ['filename' => $f['name'], 'foreground' => false]);
-            $expected[] = ['dir' => $remoteDir, 'name' => $f['name']];
+            $downloads[] = ['url' => $f['url'], 'dir' => $remoteDir, 'name' => $f['name']];
         }
 
-        $record->appendLog('  Queued ' . count($expected) . ' mod downloads on Wings…');
-        $this->waitForFiles($record, $expected);
+        $record->appendLog('  Prepared ' . count($downloads) . ' mod downloads for Wings…');
+        $this->pullFilesThrottled($record, $downloads);
 
         if (!empty($plan['configsUrl'])) {
             $record->appendLog('  Downloading the pack config bundle…');
@@ -1454,68 +1451,118 @@ class ModpackInstallService
     // ─── Wings helpers ──────────────────────────────────────────────────────
 
     /**
-     * Wait for queued Wings downloads to land.
+     * Wings rejects the fourth simultaneous remote download for a server by
+     * default. Submit downloads through a small moving window so large packs do
+     * not trip that guard.
      *
-     * @param array<int, array{dir:string, name:string}> $expected
+     * @param array<int, array{url:string, dir:string, name:string}> $downloads
      */
-    private function waitForFiles(ModpackInstall $record, array $expected, int $maxSeconds = 540): void
+    private function pullFilesThrottled(ModpackInstall $record, array $downloads): void
     {
-        if (empty($expected)) {
+        if (empty($downloads)) {
             return;
         }
 
-        $byDir = [];
-        foreach ($expected as $e) {
-            $byDir[$e['dir']][$e['name']] = true;
-        }
-        $total = count($expected);
+        $limit = $this->remoteDownloadConcurrency();
+        $total = count($downloads);
 
-        $deadline = time() + $maxSeconds;
-        $lastDone = -1;
-        $stalls   = 0;
+        $record->appendLog("  Downloading {$total} file(s) via Wings, up to {$limit} at a time…");
 
-        while (time() < $deadline) {
+        $pending = array_values($downloads);
+        $active = [];
+        $done = 0;
+        $lastLoggedDone = -1;
+        $lastProgressAt = time();
+        $deadline = time() + max(540, $total * 90);
+        $busyLoggedAt = 0;
+
+        while (!empty($pending) || !empty($active)) {
+            while (count($active) < $limit && !empty($pending)) {
+                $next = $pending[0];
+
+                try {
+                    $this->fileRepo->pull($next['url'], $next['dir'], [
+                        'filename'   => $next['name'],
+                        'foreground' => false,
+                    ]);
+                    array_shift($pending);
+                    $active[] = $next + ['lastSize' => null, 'stable' => 0];
+                    $lastProgressAt = time();
+                } catch (Throwable $e) {
+                    if (!$this->isRemoteDownloadLimitError($e)) {
+                        throw $e;
+                    }
+
+                    if (time() - $busyLoggedAt >= 30) {
+                        $record->appendLog('  Wings remote-download slots are full — waiting before queueing more files.');
+                        $busyLoggedAt = time();
+                    }
+
+                    break;
+                }
+            }
+
+            if (empty($active)) {
+                if (time() >= $deadline) {
+                    throw new RuntimeException("Timed out waiting for Wings download slots ({$done}/{$total} downloaded).");
+                }
+
+                sleep(5);
+                continue;
+            }
+
             sleep(5);
 
-            $done = 0;
-            foreach ($byDir as $dir => $names) {
-                $present = [];
-                try {
-                    foreach ($this->fileRepo->getDirectory($dir) as $entry) {
-                        if (($entry['size'] ?? 0) > 0) {
-                            $present[$entry['name'] ?? ''] = true;
-                        }
-                    }
-                } catch (Throwable) {
-                    // dir may not exist yet
-                }
-                foreach (array_keys($names) as $n) {
-                    if (isset($present[$n])) {
-                        $done++;
-                    }
-                }
-            }
+            $remaining = [];
+            foreach ($active as $file) {
+                $size = $this->remoteFileSize($file['dir'], $file['name']);
 
-            if ($done !== $lastDone) {
+                if ($size !== null && $size > 0) {
+                    if ($file['lastSize'] !== null && $size === $file['lastSize']) {
+                        $file['stable']++;
+                    } else {
+                        $file['stable'] = 0;
+                        $file['lastSize'] = $size;
+                        $lastProgressAt = time();
+                    }
+
+                    if ($file['stable'] >= 1) {
+                        $done++;
+                        $lastProgressAt = time();
+                        continue;
+                    }
+                }
+
+                $remaining[] = $file;
+            }
+            $active = $remaining;
+
+            if ($done !== $lastLoggedDone) {
                 $record->appendLog("  Downloaded {$done}/{$total} files…");
                 $record->update(['progress' => min(92, 64 + (int) (28 * $done / max(1, $total)))]);
-                $lastDone = $done;
-                $stalls   = 0;
-            } else {
-                $stalls++;
+                $lastLoggedDone = $done;
             }
 
-            if ($done >= $total) {
-                return;
-            }
-
-            if ($stalls >= 8) { // ~40s with no progress
-                $record->appendLog("  Download progress stalled at {$done}/{$total} — continuing anyway.");
-                return;
+            if (time() >= $deadline || time() - $lastProgressAt > 300) {
+                throw new RuntimeException("Timed out waiting for Wings downloads ({$done}/{$total} downloaded).");
             }
         }
+    }
 
-        $record->appendLog("  Reached time limit waiting for downloads ({$lastDone}/{$total}).");
+    private function remoteDownloadConcurrency(): int
+    {
+        return max(
+            1,
+            (int) config('modpack-manager.remote_download_concurrency', self::DEFAULT_REMOTE_DOWNLOAD_CONCURRENCY)
+        );
+    }
+
+    private function isRemoteDownloadLimitError(Throwable $e): bool
+    {
+        $message = strtolower($e->getMessage());
+
+        return str_contains($message, 'simultaneous remote file downloads')
+            || str_contains($message, 'reached its limit');
     }
 
     private function remoteFileSize(string $dir, string $name): ?int
