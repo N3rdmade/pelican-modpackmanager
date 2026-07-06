@@ -40,8 +40,10 @@ class FtbService
      * Search modpacks (or list popular ones when the query is empty), then
      * resolve each id to a card via a pooled batch of detail requests.
      */
-    public function search(string $query = '', int $limit = 16): array
+    public function search(string $query = '', int $limit = 16, array $filters = []): array
     {
+        // $filters (MC version / loader / category) are accepted for interface
+        // parity with the browsable providers; FTB's search has no facet support.
         $query = trim($query);
 
         $endpoint = $query === ''

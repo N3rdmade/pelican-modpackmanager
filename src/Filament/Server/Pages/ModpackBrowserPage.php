@@ -50,6 +50,11 @@ class ModpackBrowserPage extends Page
     public string $search    = '';
     public string $provider  = 'all';   // 'all' | 'curseforge' | 'modrinth' | 'ftb' | 'atlauncher'
 
+    // Facet filters (best-effort; only the browsable providers honour them).
+    public string $filterVersion  = '';  // Minecraft version, e.g. '1.20.1'
+    public string $filterLoader   = '';  // 'forge' | 'neoforge' | 'fabric' | 'quilt'
+    public string $filterCategory = '';  // canonical category slug (see getFilterCategoryOptions)
+
     /**
      * Providers queried by the combined "all" view. FTB (per-result detail
      * fan-out) and ATLauncher (large list fetch) are intentionally excluded
@@ -215,6 +220,126 @@ class ModpackBrowserPage extends Page
         return ModpackInstall::STEPS;
     }
 
+    // ─── Filter options (drive the browser's filter panel) ─────────────────────
+
+    /**
+     * Minecraft versions offered in the filter. Pulled live from CurseForge
+     * (cached a day) so the list stays complete and current; falls back to a
+     * curated static list when CurseForge is unavailable (no API key / network).
+     */
+    public function getFilterVersionOptions(): array
+    {
+        $versions = app(CurseForgeService::class)->getMinecraftVersions();
+
+        return !empty($versions) ? $versions : [
+            '1.21.1', '1.21', '1.20.6', '1.20.4', '1.20.1', '1.20',
+            '1.19.2', '1.18.2', '1.16.5', '1.12.2', '1.7.10',
+        ];
+    }
+
+    /** Canonical loader slug → label. */
+    public function getFilterLoaderOptions(): array
+    {
+        return [
+            'forge'    => 'Forge',
+            'neoforge' => 'NeoForge',
+            'fabric'   => 'Fabric',
+            'quilt'    => 'Quilt',
+        ];
+    }
+
+    /**
+     * Whether the category filter applies to the active provider. FTB and
+     * ATLauncher have no category facet, so the control is hidden for them.
+     */
+    public function categoryFilterAvailable(): bool
+    {
+        return in_array($this->provider, ['all', 'curseforge', 'modrinth'], true);
+    }
+
+    /**
+     * Category options for the active provider, fetched live and cached a day:
+     *  - Modrinth view → Modrinth categories (option value = Modrinth slug).
+     *  - All sources / CurseForge → CurseForge categories (value = CF category id).
+     * The value carries provider-specific semantics; the services apply it only to
+     * the provider it belongs to. Falls back to a static list per provider when the
+     * live fetch is unavailable.
+     *
+     * @return array<string, string> option value => label
+     */
+    public function getFilterCategoryOptions(): array
+    {
+        if ($this->provider === 'modrinth') {
+            $categories = app(ModrinthService::class)->getCategories();
+
+            if (!empty($categories)) {
+                $options = [];
+                foreach ($categories as $c) {
+                    $options[$c['slug']] = $c['name'];
+                }
+                return $options;
+            }
+
+            return [
+                'adventure'    => 'Adventure',
+                'challenging'  => 'Challenging',
+                'combat'       => 'Combat',
+                'kitchen-sink' => 'Kitchen Sink',
+                'lightweight'  => 'Lightweight',
+                'magic'        => 'Magic',
+                'multiplayer'  => 'Multiplayer',
+                'optimization' => 'Optimization',
+                'quests'       => 'Quests',
+                'technology'   => 'Technology',
+            ];
+        }
+
+        // All sources / CurseForge → CurseForge categories (value = CF category id).
+        $categories = app(CurseForgeService::class)->getCategories();
+
+        if (!empty($categories)) {
+            $options = [];
+            foreach ($categories as $c) {
+                $options[(string) $c['id']] = $c['name'];
+            }
+            return $options;
+        }
+
+        return [
+            '4475' => 'Adventure and RPG',
+            '4472' => 'Tech',
+            '4473' => 'Magic',
+            '4478' => 'Quests',
+            '4483' => 'Combat / PvP',
+            '4476' => 'Exploration',
+            '4477' => 'Skyblock',
+            '4481' => 'Small / Light',
+            '4474' => 'Sci-Fi',
+            '4479' => 'Hardcore',
+        ];
+    }
+
+    /**
+     * The active filters as passed to the provider services. Empty entries are
+     * dropped so a service only constrains on what the user actually chose.
+     *
+     * @return array<string, string>
+     */
+    private function activeFilters(): array
+    {
+        return array_filter([
+            'gameVersion' => $this->filterVersion,
+            'loader'      => $this->filterLoader,
+            'category'    => $this->filterCategory,
+        ], fn ($v) => $v !== '');
+    }
+
+    /** How many filters are currently set (drives the panel's badge). */
+    public function getActiveFilterCount(): int
+    {
+        return count($this->activeFilters());
+    }
+
     // ─── Actions ──────────────────────────────────────────────────────────────
 
     /**
@@ -225,10 +350,32 @@ class ModpackBrowserPage extends Page
         $this->loadModpacks();
     }
 
+    /**
+     * Re-run the current search with the chosen facet filters applied.
+     */
+    public function applyFilters(): void
+    {
+        $this->loadModpacks();
+    }
+
+    /**
+     * Reset all facet filters and reload.
+     */
+    public function clearFilters(): void
+    {
+        $this->filterVersion  = '';
+        $this->filterLoader   = '';
+        $this->filterCategory = '';
+        $this->loadModpacks();
+    }
+
     public function setProvider(string $provider): void
     {
         $this->provider = $provider;
         $this->search   = '';
+        // Category values are provider-specific (CurseForge ids vs Modrinth slugs),
+        // so a value picked under one provider is meaningless under another.
+        $this->filterCategory = '';
         $this->loadModpacks();
     }
 
@@ -743,10 +890,12 @@ class ModpackBrowserPage extends Page
         $this->modpacks  = [];
 
         try {
+            $filters = $this->activeFilters();
+
             if ($this->provider === 'all') {
-                $this->modpacks = $this->searchAllProviders($this->search);
+                $this->modpacks = $this->searchAllProviders($this->search, filters: $filters);
             } else {
-                $this->modpacks = $this->providerService($this->provider)->search($this->search);
+                $this->modpacks = $this->providerService($this->provider)->search($this->search, filters: $filters);
             }
         } catch (Throwable $e) {
             $this->errorMsg = $e->getMessage();
@@ -766,14 +915,14 @@ class ModpackBrowserPage extends Page
      *
      * @return array<int, array<string, mixed>>
      */
-    private function searchAllProviders(string $query, int $perProvider = 10): array
+    private function searchAllProviders(string $query, int $perProvider = 10, array $filters = []): array
     {
         $buckets = [];
 
         foreach (self::COMBINED_PROVIDERS as $provider) {
             try {
                 $buckets[$provider] = array_slice(
-                    $this->providerService($provider)->search($query),
+                    $this->providerService($provider)->search($query, filters: $filters),
                     0,
                     $perProvider
                 );

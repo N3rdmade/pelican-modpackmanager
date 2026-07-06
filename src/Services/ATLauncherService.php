@@ -44,8 +44,9 @@ class ATLauncherService
     /**
      * Search the (cached) full pack list client-side. Empty query lists newest.
      */
-    public function search(string $query = '', int $limit = 24): array
+    public function search(string $query = '', int $limit = 24, array $filters = []): array
     {
+        // $filters accepted for interface parity; ATLauncher's list has no facets.
         $packs = $this->allPacks();
         $query = trim(strtolower($query));
 

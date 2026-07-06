@@ -206,6 +206,19 @@
     .mpm-pill--atl.is-active { background:linear-gradient(135deg, var(--mpm-atl), #1273c4); box-shadow:0 6px 18px color-mix(in srgb, var(--mpm-atl) 40%, transparent); }
     .mpm-pill.is-active .dot { background:rgba(255,255,255,.9); box-shadow:none; }
 
+    /* ══════════ Filter button + panel ══════════ */
+    .mpm-filterbtn { position:relative; display:inline-flex; align-items:center; gap:8px; margin-left:auto; padding:8px 15px; border-radius:12px; cursor:pointer;
+        font-size:.85rem; font-weight:700; color:var(--mpm-text-2); background:var(--mpm-surface-2); border:1px solid var(--mpm-border); transition:all .15s; }
+    .mpm-filterbtn:hover { color:var(--mpm-text); border-color:var(--mpm-border-2); transform:translateY(-1px); }
+    .mpm-filterbtn svg { width:16px; height:16px; }
+    .mpm-filterbtn.is-open, .mpm-filterbtn.is-on { color:var(--mpm-accent); border-color:color-mix(in srgb, var(--mpm-accent) 45%, var(--mpm-border)); background:var(--mpm-accent-lo); }
+    .mpm-filterbtn__badge { display:inline-flex; align-items:center; justify-content:center; min-width:18px; height:18px; padding:0 5px; border-radius:999px;
+        font-size:.66rem; font-weight:800; color:#fff; background:var(--mpm-accent); }
+
+    .mpm-filterpanel { margin-top:14px; padding:18px; border-radius:16px; background:var(--mpm-surface-2); border:1px solid var(--mpm-border); }
+    .mpm-filtergrid { display:grid; grid-template-columns:repeat(auto-fit, minmax(180px, 1fr)); gap:14px; }
+    .mpm-filteractions { display:flex; justify-content:flex-end; align-items:center; gap:10px; margin-top:16px; }
+
     /* subtle secondary action (last log) */
     .mpm-loglink { display:inline-flex; align-items:center; gap:8px; margin-top:16px; padding:8px 14px; border-radius:11px; cursor:pointer;
         font-size:.8rem; font-weight:700; color:var(--mpm-text-2); background:var(--mpm-surface-2); border:1px solid var(--mpm-border); transition:all .15s; }
@@ -217,18 +230,18 @@
     .mpm-feed-head h3 { font-size:.95rem; font-weight:800; margin:0; letter-spacing:-.01em; }
     .mpm-feed-head .count { font-size:.75rem; color:var(--mpm-muted); font-weight:600; }
 
-    /* ══════════ Results feed (rows) ══════════ */
-    .mpm-feed { display:flex; flex-direction:column; gap:10px; }
+    /* ══════════ Results feed (card grid) ══════════ */
+    .mpm-feed { display:grid; grid-template-columns:repeat(auto-fill, minmax(320px, 1fr)); gap:14px; align-items:stretch; }
     .mpm-row {
         --row-c: var(--mpm-accent);
-        position:relative; display:flex; align-items:center; gap:16px; width:100%; text-align:left;
-        padding:14px 16px; border-radius:16px; cursor:pointer;
+        position:relative; display:flex; flex-wrap:wrap; align-items:flex-start; align-content:flex-start; gap:14px 16px; width:100%; text-align:left;
+        padding:16px; border-radius:16px; cursor:pointer;
         background:var(--mpm-surface); border:1px solid var(--mpm-border); box-shadow:var(--mpm-shadow);
         transition:transform .16s cubic-bezier(.16,1,.3,1), box-shadow .16s, border-color .16s, background .16s;
     }
     .mpm-row::before { content:""; position:absolute; left:0; top:12px; bottom:12px; width:3px; border-radius:3px;
         background:var(--row-c); opacity:0; transition:opacity .16s; }
-    .mpm-row:hover { transform:translateX(3px); border-color:color-mix(in srgb, var(--row-c) 45%, var(--mpm-border));
+    .mpm-row:hover { transform:translateY(-3px); border-color:color-mix(in srgb, var(--row-c) 45%, var(--mpm-border));
         box-shadow:0 10px 28px color-mix(in srgb, var(--row-c) 16%, transparent); }
     .mpm-row:hover::before { opacity:1; }
     .mpm-row:focus-visible { outline:2px solid var(--mpm-accent); outline-offset:2px; }
@@ -237,12 +250,12 @@
     .mpm-row__art { position:relative; width:56px; height:56px; border-radius:13px; object-fit:cover; flex-shrink:0;
         border:1px solid var(--mpm-border-2); background:var(--mpm-surface-3); box-shadow:0 4px 12px rgba(0,0,0,.18); }
     .mpm-row__art--ph { display:flex; align-items:center; justify-content:center; color:var(--mpm-muted); }
-    .mpm-row__body { flex:1; min-width:0; }
+    .mpm-row__body { flex:1 1 200px; min-width:0; }
     .mpm-row__title { display:flex; align-items:center; gap:9px; flex-wrap:wrap; }
     .mpm-row__name { font-size:.98rem; font-weight:800; margin:0; letter-spacing:-.01em; line-height:1.2;
         white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:100%; }
-    .mpm-row__desc { font-size:.79rem; color:var(--mpm-text-2); line-height:1.45; margin:5px 0 0;
-        display:-webkit-box; -webkit-line-clamp:1; -webkit-box-orient:vertical; overflow:hidden; }
+    .mpm-row__desc { font-size:.79rem; color:var(--mpm-text-2); line-height:1.45; margin:6px 0 0;
+        display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
     .mpm-row__meta { display:flex; flex-wrap:wrap; align-items:center; gap:14px; margin-top:8px; font-size:.72rem; color:var(--mpm-muted); }
     .mpm-row__meta span { display:inline-flex; align-items:center; gap:5px; }
     .mpm-row__meta svg { width:13px; height:13px; }
@@ -257,9 +270,9 @@
     .mpm-chip--src { color:#fff; background:var(--c); border-color:var(--c); box-shadow:0 2px 8px color-mix(in srgb, var(--c) 45%, transparent); }
     .mpm-chip--src::before { background:rgba(255,255,255,.9); }
 
-    /* row CTA */
-    .mpm-row__cta { flex-shrink:0; display:flex; align-items:center; gap:12px; }
-    .mpm-cta-state { display:inline-flex; align-items:center; gap:7px; padding:9px 16px; border-radius:11px;
+    /* row CTA — full-width bar pinned to the bottom of the card */
+    .mpm-row__cta { flex:1 1 100%; display:flex; align-items:center; gap:12px; margin-top:2px; }
+    .mpm-cta-state { flex:1; display:inline-flex; align-items:center; justify-content:center; gap:7px; padding:10px 16px; border-radius:11px;
         font-size:.82rem; font-weight:700; white-space:nowrap; transition:all .15s; }
     .mpm-cta-state svg { width:15px; height:15px; }
     .mpm-cta--install { color:#fff; background:linear-gradient(135deg, var(--mpm-accent), color-mix(in srgb, var(--mpm-accent) 55%, var(--mpm-accent-2)));
@@ -315,16 +328,17 @@
     .mpm-bar__fill.is-done   { background:linear-gradient(135deg, var(--mpm-success), #4ade80); }
     .mpm-bar__fill.is-failed { background:linear-gradient(135deg, var(--mpm-danger), #f87171); }
 
-    /* vertical timeline */
-    .mpm-timeline { display:flex; flex-direction:column; gap:2px; }
-    .mpm-tl { position:relative; display:flex; align-items:center; gap:14px; padding:11px 0 11px 4px; }
-    .mpm-tl__rail { position:relative; flex-shrink:0; width:34px; display:flex; justify-content:center; }
+    /* horizontal timeline (stepper) — steps flow left→right so the console stays compact */
+    .mpm-timeline { display:flex; flex-direction:row; align-items:flex-start; gap:0; }
+    .mpm-tl { position:relative; flex:1; min-width:0; display:flex; flex-direction:column; align-items:center; gap:9px; padding:6px 4px 0; text-align:center; }
+    .mpm-tl__rail { position:relative; width:100%; display:flex; justify-content:center; }
     .mpm-tl__node { position:relative; z-index:1; width:30px; height:30px; border-radius:50%; display:flex; align-items:center; justify-content:center;
         background:var(--mpm-surface-3); color:var(--mpm-muted); border:2px solid var(--mpm-border-2); transition:all .3s; }
     .mpm-tl__node svg { width:15px; height:15px; }
-    .mpm-tl:not(:last-child) .mpm-tl__rail::after { content:""; position:absolute; top:26px; bottom:-16px; left:50%; transform:translateX(-50%);
-        width:2px; background:var(--mpm-border-2); transition:background .3s; }
-    .mpm-tl__label { font-size:.9rem; font-weight:600; color:var(--mpm-text-2); transition:color .3s; }
+    /* connector runs from this node's centre to the next node's centre */
+    .mpm-tl:not(:last-child) .mpm-tl__rail::after { content:""; position:absolute; top:14px; left:50%; right:-50%;
+        height:2px; background:var(--mpm-border-2); transition:background .3s; }
+    .mpm-tl__label { font-size:.72rem; line-height:1.25; font-weight:600; color:var(--mpm-text-2); transition:color .3s; }
     .mpm-tl.is-done  .mpm-tl__node { background:var(--mpm-success); border-color:var(--mpm-success); color:#fff; }
     .mpm-tl.is-done  .mpm-tl__rail::after { background:var(--mpm-success); }
     .mpm-tl.is-done  .mpm-tl__label { color:var(--mpm-text); }
@@ -474,6 +488,13 @@
         .mpm-row { flex-wrap:wrap; }
         .mpm-row__cta { width:100%; justify-content:space-between; margin-top:4px; }
         .mpm-cta-state { flex:1; justify-content:center; }
+        /* labels get too cramped side-by-side on narrow viewports — fall back to the vertical stepper */
+        .mpm-timeline { flex-direction:column; gap:2px; }
+        .mpm-tl { flex:none; flex-direction:row; align-items:center; gap:14px; padding:11px 0 11px 4px; text-align:left; }
+        .mpm-tl__rail { width:34px; flex-shrink:0; }
+        .mpm-tl:not(:last-child) .mpm-tl__rail::after { top:26px; bottom:-16px; left:50%; right:auto;
+            width:2px; height:auto; transform:translateX(-50%); }
+        .mpm-tl__label { font-size:.9rem; }
     }
     @media (max-width:560px){
         .mpm-hero__title { font-size:1.25rem; }
@@ -486,6 +507,7 @@
     class="mpm"
     x-data="{
         showDebug: false,
+        filtersOpen: false,
         drawerOpen: @entangle('showModal'),
         lastLogOpen: @entangle('showLastLog'),
         starting: false,
@@ -699,6 +721,66 @@
                 <button type="button" wire:click="setProvider('modrinth')" class="mpm-pill mpm-pill--mr {{ $provider === 'modrinth' ? 'is-active' : '' }}"><span class="dot"></span> Modrinth</button>
                 <button type="button" wire:click="setProvider('ftb')" class="mpm-pill mpm-pill--ftb {{ $provider === 'ftb' ? 'is-active' : '' }}"><span class="dot"></span> FTB</button>
                 <button type="button" wire:click="setProvider('atlauncher')" class="mpm-pill mpm-pill--atl {{ $provider === 'atlauncher' ? 'is-active' : '' }}"><span class="dot"></span> ATLauncher</button>
+
+                @php $activeFilters = $this->getActiveFilterCount(); @endphp
+                <button type="button" class="mpm-filterbtn {{ $activeFilters ? 'is-on' : '' }}" @click="filtersOpen = !filtersOpen" :class="{ 'is-open': filtersOpen }">
+                    <svg fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2a1 1 0 01-.293.707L14 13.414V19a1 1 0 01-.553.894l-4 2A1 1 0 018 21v-7.586L3.293 6.707A1 1 0 013 6V4z"/></svg>
+                    Filters
+                    @if($activeFilters)<span class="mpm-filterbtn__badge">{{ $activeFilters }}</span>@endif
+                </button>
+            </div>
+
+            {{-- Filter panel: Minecraft version · loader · category --}}
+            <div class="mpm-filterpanel" x-show="filtersOpen" x-cloak x-transition>
+                <div class="mpm-filtergrid">
+                    <div>
+                        <label class="mpm-label">Minecraft version</label>
+                        <div class="mpm-select-wrap">
+                            <select class="mpm-select" wire:model="filterVersion">
+                                <option value="">Any version</option>
+                                @foreach($this->getFilterVersionOptions() as $v)
+                                    <option value="{{ $v }}">{{ $v }}</option>
+                                @endforeach
+                            </select>
+                            <svg class="caret" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+                        </div>
+                    </div>
+                    <div>
+                        <label class="mpm-label">Loader</label>
+                        <div class="mpm-select-wrap">
+                            <select class="mpm-select" wire:model="filterLoader">
+                                <option value="">Any loader</option>
+                                @foreach($this->getFilterLoaderOptions() as $slug => $label)
+                                    <option value="{{ $slug }}">{{ $label }}</option>
+                                @endforeach
+                            </select>
+                            <svg class="caret" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+                        </div>
+                    </div>
+                    @if($this->categoryFilterAvailable())
+                    <div>
+                        <label class="mpm-label">Category</label>
+                        <div class="mpm-select-wrap">
+                            <select class="mpm-select" wire:model="filterCategory">
+                                <option value="">Any category</option>
+                                @foreach($this->getFilterCategoryOptions() as $slug => $label)
+                                    <option value="{{ $slug }}">{{ $label }}</option>
+                                @endforeach
+                            </select>
+                            <svg class="caret" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+                        </div>
+                    </div>
+                    @endif
+                </div>
+                <div class="mpm-filteractions">
+                    @if($activeFilters)
+                        <button type="button" class="mpm-btn mpm-btn--ghost" wire:click="clearFilters">Clear filters</button>
+                    @endif
+                    <button type="button" class="mpm-btn mpm-btn--primary" wire:click="applyFilters">
+                        <svg fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
+                        Apply filters
+                    </button>
+                </div>
             </div>
 
             @if($hasLastLog)

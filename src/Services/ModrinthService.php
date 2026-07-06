@@ -3,9 +3,11 @@
 namespace Cosmii02\ModpackManager\Services;
 
 use Illuminate\Http\Client\PendingRequest;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use RuntimeException;
+use Throwable;
 
 class ModrinthService
 {
@@ -31,11 +33,28 @@ class ModrinthService
     /**
      * Search for modpacks on Modrinth.
      */
-    public function search(string $query = '', int $page = 0, int $pageSize = 20): array
+    public function search(string $query = '', int $page = 0, int $pageSize = 20, array $filters = []): array
     {
+        // Facets are AND-ed groups; each inner array is an OR set. Modrinth folds
+        // both mod loaders and content categories into the `categories` facet.
+        $facets = [['project_type:modpack']];
+
+        if (!empty($filters['gameVersion'])) {
+            $facets[] = ['versions:' . $filters['gameVersion']];
+        }
+        if (!empty($filters['loader'])) {
+            $facets[] = ['categories:' . $filters['loader']];
+        }
+        // Category applies only when the value is a Modrinth slug (Modrinth-provider
+        // view). In the combined view the value is a numeric CurseForge category id,
+        // which Modrinth can't map — so numeric values are intentionally skipped.
+        if (!empty($filters['category']) && !is_numeric($filters['category'])) {
+            $facets[] = ['categories:' . $filters['category']];
+        }
+
         $response = $this->client->get('/search', [
             'query'  => $query,
-            'facets' => json_encode([['project_type:modpack']]),
+            'facets' => json_encode($facets),
             'limit'  => $pageSize,
             'offset' => $page * $pageSize,
             'index'  => 'downloads',
@@ -49,6 +68,58 @@ class ModrinthService
         $hits = $response->json('hits', []);
 
         return array_map(fn (array $hit) => $this->normalizeHit($hit), $hits);
+    }
+
+    /**
+     * Modpack categories from Modrinth, alphabetical — used to populate the
+     * browser's category filter when Modrinth is the active provider. Cached a
+     * day. Each entry is ['slug' => string, 'name' => string]; the slug is what
+     * the search facet expects. Returns [] on failure; only non-empty results
+     * are cached.
+     *
+     * @return array<int, array{slug:string, name:string}>
+     */
+    public function getCategories(): array
+    {
+        $cacheKey = 'modpack-manager:modrinth:categories';
+
+        if ($cached = Cache::get($cacheKey)) {
+            return $cached;
+        }
+
+        try {
+            $response = $this->client->get('/tag/category');
+
+            if ($response->failed()) {
+                Log::warning('[ModpackManager] Modrinth categories failed', ['status' => $response->status()]);
+                return [];
+            }
+
+            $categories = [];
+            foreach ($response->json() ?? [] as $c) {
+                // Modrinth folds loaders into the same tag list; keep only genuine
+                // modpack content categories.
+                if (($c['project_type'] ?? null) === 'modpack' && !empty($c['name'])) {
+                    $slug = (string) $c['name'];
+                    $categories[$slug] = [
+                        'slug' => $slug,
+                        'name' => ucwords(str_replace('-', ' ', $slug)),
+                    ];
+                }
+            }
+
+            $categories = array_values($categories);
+            usort($categories, fn ($a, $b) => strcasecmp($a['name'], $b['name']));
+
+            if (!empty($categories)) {
+                Cache::put($cacheKey, $categories, now()->addDay());
+            }
+
+            return $categories;
+        } catch (Throwable $e) {
+            Log::warning('[ModpackManager] Modrinth categories error', ['error' => $e->getMessage()]);
+            return [];
+        }
     }
 
     /**

@@ -3,6 +3,7 @@
 namespace Cosmii02\ModpackManager\Services;
 
 use Illuminate\Http\Client\PendingRequest;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use RuntimeException;
@@ -13,6 +14,14 @@ class CurseForgeService
     private const BASE_URL   = 'https://api.curseforge.com/v1';
     private const GAME_ID    = 432;   // Minecraft
     private const CLASS_ID   = 4471;  // Modpacks
+
+    /** Canonical loader slug → CurseForge modLoaderType enum. */
+    private const LOADER_TYPES = [
+        'forge'    => 1,
+        'fabric'   => 4,
+        'quilt'    => 5,
+        'neoforge' => 6,
+    ];
 
     private PendingRequest $client;
 
@@ -36,9 +45,9 @@ class CurseForgeService
      *
      * @return array{id:int, name:string, summary:string, downloadCount:int, logo:array, latestFiles:array, authors:array, dateModified:string}[]
      */
-    public function search(string $query = '', int $page = 0, int $pageSize = 20): array
+    public function search(string $query = '', int $page = 0, int $pageSize = 20, array $filters = []): array
     {
-        $response = $this->client->get('/mods/search', [
+        $params = [
             'gameId'       => self::GAME_ID,
             'classId'      => self::CLASS_ID,
             'searchFilter' => $query,
@@ -46,7 +55,20 @@ class CurseForgeService
             'sortOrder'    => 'desc',
             'index'        => $page * $pageSize,
             'pageSize'     => $pageSize,
-        ]);
+        ];
+
+        // Optional facet filters (Minecraft version / loader / modpack category).
+        if (!empty($filters['gameVersion'])) {
+            $params['gameVersion'] = $filters['gameVersion'];
+        }
+        if (!empty($filters['loader']) && ($loaderType = self::LOADER_TYPES[$filters['loader']] ?? null)) {
+            $params['modLoaderType'] = $loaderType;
+        }
+        if (!empty($filters['category']) && is_numeric($filters['category'])) {
+            $params['categoryId'] = (int) $filters['category']; // a CurseForge category id
+        }
+
+        $response = $this->client->get('/mods/search', $params);
 
         if ($response->failed()) {
             Log::error('[ModpackManager] CurseForge search failed', ['status' => $response->status(), 'body' => $response->body()]);
@@ -56,6 +78,100 @@ class CurseForgeService
         $data = $response->json('data', []);
 
         return array_map(fn (array $mod) => $this->normalizeMod($mod), $data);
+    }
+
+    /**
+     * All Minecraft release versions known to CurseForge, newest first — used to
+     * populate the browser's version filter so it stays current. Cached for a day
+     * (this taxonomy changes rarely). Returns [] on any failure so callers can
+     * fall back to their own list; only successful non-empty results are cached.
+     *
+     * @return string[] e.g. ['1.21.1', '1.21', '1.20.6', …]
+     */
+    public function getMinecraftVersions(): array
+    {
+        $cacheKey = 'modpack-manager:curseforge:mc-versions';
+
+        if ($cached = Cache::get($cacheKey)) {
+            return $cached;
+        }
+
+        try {
+            $response = $this->client->get('/minecraft/version');
+
+            if ($response->failed()) {
+                Log::warning('[ModpackManager] CurseForge minecraft version list failed', ['status' => $response->status()]);
+                return [];
+            }
+
+            $versions = [];
+            foreach ($response->json('data', []) ?? [] as $v) {
+                $str = $v['versionString'] ?? null;
+                // Numeric releases only — drop snapshots ("23w31a"), pre-releases, etc.
+                if (is_string($str) && preg_match('/^\d+\.\d+(\.\d+)?$/', $str)) {
+                    $versions[$str] = true;
+                }
+            }
+
+            $versions = array_keys($versions);
+            usort($versions, fn ($a, $b) => version_compare($b, $a)); // newest first
+
+            if (!empty($versions)) {
+                Cache::put($cacheKey, $versions, now()->addDay());
+            }
+
+            return $versions;
+        } catch (Throwable $e) {
+            Log::warning('[ModpackManager] CurseForge minecraft version list error', ['error' => $e->getMessage()]);
+            return [];
+        }
+    }
+
+    /**
+     * Modpack categories from CurseForge (children of class 4471), alphabetical —
+     * used to populate the browser's category filter. Cached for a day. Each entry
+     * is ['id' => int, 'name' => string]. Returns [] on failure; only successful
+     * non-empty results are cached.
+     *
+     * @return array<int, array{id:int, name:string}>
+     */
+    public function getCategories(): array
+    {
+        $cacheKey = 'modpack-manager:curseforge:categories';
+
+        if ($cached = Cache::get($cacheKey)) {
+            return $cached;
+        }
+
+        try {
+            $response = $this->client->get('/categories', [
+                'gameId'  => self::GAME_ID,
+                'classId' => self::CLASS_ID,
+            ]);
+
+            if ($response->failed()) {
+                Log::warning('[ModpackManager] CurseForge categories failed', ['status' => $response->status()]);
+                return [];
+            }
+
+            $categories = [];
+            foreach ($response->json('data', []) ?? [] as $c) {
+                if (isset($c['id'], $c['name'])) {
+                    $categories[] = ['id' => (int) $c['id'], 'name' => (string) $c['name']];
+                }
+            }
+
+            usort($categories, fn ($a, $b) => strcasecmp($a['name'], $b['name']));
+
+            if (!empty($categories)) {
+                Cache::put($cacheKey, $categories, now()->addDay());
+            }
+
+            return $categories;
+        } catch (Throwable $e) {
+            Log::warning('[ModpackManager] CurseForge categories error', ['error' => $e->getMessage()]);
+            return [];
+        }
     }
 
     /**
