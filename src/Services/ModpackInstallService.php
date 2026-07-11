@@ -294,15 +294,20 @@ class ModpackInstallService
     {
         $record->markStepRunning('delete_files');
 
-        // ALWAYS clear launcher scripts a previous self-contained server pack may have left,
-        // even when "Delete existing files" is off. A new pack ships its own launcher, so any
-        // pre-existing one is stale — and a stale variables.txt is exactly what makes a
-        // NeoForge pack (ATM10) get read as the previous Forge pack (ATM9) and keep the wrong
-        // egg. These are tiny launcher files, never user data.
-        foreach (['start.sh', 'run.sh', 'variables.txt', 'user_jvm_args.txt'] as $file) {
+        // ALWAYS clear launcher scripts AND loader-metadata files a previous install may have
+        // left, even when "Delete existing files" is off. A new pack ships its own, so any
+        // pre-existing one is stale. Two failure modes this prevents:
+        //   • a stale variables.txt makes a NeoForge pack (ATM10) get read as the previous Forge
+        //     pack (ATM9) and keep the wrong egg;
+        //   • a stale manifest.json / modrinth.index.json makes detectLoader() report the
+        //     PREVIOUS pack's loader — e.g. installing Forge 1.20.1 DeceasedCraft over a leftover
+        //     NeoForge 1.21.1 manifest was detected as "neoforge 21.1.221" and stayed on the
+        //     NeoForge egg. This runs BEFORE download, so the current pack's own files (extracted
+        //     afterwards) are untouched. These are tiny metadata files, never user data.
+        foreach (['start.sh', 'run.sh', 'variables.txt', 'user_jvm_args.txt', 'manifest.json', 'modrinth.index.json'] as $file) {
             try {
                 $this->fileRepo->deleteFiles('/', [$file]);
-                $record->appendLog("  Cleared stale launcher file: /{$file}");
+                $record->appendLog("  Cleared stale launcher/metadata file: /{$file}");
             } catch (Throwable) {
                 // Usually absent; ignore.
             }
@@ -528,6 +533,13 @@ class ModpackInstallService
     {
         $record->markStepRunning('configure_loader');
         $record->appendLog('Configuring startup / mod loader…');
+        $record->appendLog(sprintf(
+            '  [diag] mode=%s, CF-tagged loader=%s, mc=%s, version=%s',
+            $plan['mode'] ?? '?',
+            $plan['loader'] ?? '—',
+            $plan['mc'] ?? '—',
+            $plan['version'] ?? '—'
+        ));
 
         try {
             // Self-contained server packs (ServerPackCreator's start.sh, or a Forge/NeoForge
@@ -627,16 +639,19 @@ class ModpackInstallService
             $startup = 'bash run.sh nogui';
         }
 
-        // Stale-launcher guard: if the pack's real loader (CurseForge `gameVersions`, carried
-        // on the plan) contradicts what the on-disk launcher claims, the launcher is a leftover
-        // from a previous install — bail so the normal egg-switch path handles this pack with
-        // the correct loader. This is what catches an ATM10 (NeoForge) install reading a stale
-        // ATM9 (Forge) variables.txt.
+        // The on-disk launcher is authoritative: stepDeleteFiles() always clears any
+        // start.sh/run.sh/variables.txt a *previous* install left BEFORE this pack is
+        // downloaded, so whatever launcher is here now was extracted from THIS pack's archive
+        // and describes its own loader. The CurseForge `gameVersions` tag carried on the plan
+        // is the weaker signal — for Minecraft 1.20.1 (the one version where Forge and NeoForge
+        // coexist) packs are routinely tagged "NeoForge" (or both) even when they're Forge, and
+        // vice-versa. So when the two disagree we TRUST THE LAUNCHER rather than bail to the
+        // egg-switch path (which, having no manifest for a server pack, would blindly follow the
+        // mistagged CF loader and land a Forge pack on the NeoForge egg — the exact bug).
         $planLoader = $this->normalizeLoader($plan['loader'] ?? null);
         $diskLoader = $this->normalizeLoader($loader);
         if ($planLoader && $diskLoader && $planLoader !== $diskLoader) {
-            $record->appendLog("  Ignoring a stale launcher script (it says “{$diskLoader}”, but this pack is “{$planLoader}”) — installing as a normal pack instead.");
-            return false;
+            $record->appendLog("  Note: CurseForge tags this pack “{$planLoader}”, but its own launcher is “{$diskLoader}” — trusting the launcher (the CF loader tag is unreliable for 1.20.1 Forge/NeoForge).");
         }
 
         if ($hasSpc) {
@@ -734,6 +749,17 @@ class ModpackInstallService
      */
     private function switchToLoaderEgg(ModpackInstall $record, Server $server, string $loader, ?string $mc, ?string $ver): ?Egg
     {
+        // [diag] show every installed egg and how it scores for the target loader, so the log
+        // makes clear why a given egg was (or wasn't) picked.
+        try {
+            $scores = Egg::with('variables')->get()
+                ->map(fn ($e) => "{$e->name}={$this->loaderEggScore($e, $loader)}")
+                ->implode(', ');
+            $record->appendLog("  [diag] egg scores for “{$loader}”: {$scores}");
+        } catch (Throwable) {
+            // diagnostics only — never fail the install over this
+        }
+
         $egg = $this->findLoaderEgg($loader);
         if (!$egg) {
             // No matching egg installed — try to import a bundled one (e.g. many panels
@@ -792,12 +818,25 @@ class ModpackInstallService
         };
 
         $set(['MC_VERSION', 'MINECRAFT_VERSION'], $mc);
+
+        // The Forge egg wants the FULL Maven version in FORGE_VERSION — it downloads
+        // .../forge/${FORGE_VERSION}/forge-${FORGE_VERSION}-installer.jar, and Forge's artifact
+        // is named "<mc>-<build>" (e.g. "1.20.1-47.4.0"). We carry the build number (47.4.0) and
+        // the MC version separately, so stitch them together. Without this the installer URL 404s
+        // and Forge never installs — the server then falls back to "-jar server.jar" (absent) and
+        // dies with a Java "unable to access jarfile" error. NeoForge is the opposite: its egg
+        // wants just the build number (21.1.221) in NEOFORGE_VERSION, so leave that untouched.
+        $loaderVer = $ver;
+        if ($loader === 'forge' && $ver !== null && $ver !== '' && $mc && !str_contains($ver, '-')) {
+            $loaderVer = "{$mc}-{$ver}";
+        }
+
         $set(match ($loader) {
             'forge'    => ['FORGE_VERSION', 'BUILD_VERSION'],
             'neoforge' => ['NEOFORGE_VERSION', 'FORGE_VERSION', 'BUILD_VERSION'],
             'fabric'   => ['LOADER_VERSION', 'FABRIC_VERSION'],
             default    => [],
-        }, $ver);
+        }, $loaderVer);
 
         if ($applied) {
             $record->appendLog('  Set variables: ' . json_encode($applied));

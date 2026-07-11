@@ -109,14 +109,30 @@ straight to path B.
 Stale launcher files are the recurring trap here — a `start.sh`/`variables.txt`/`run.sh`
 left by a *previous* install gets mistaken for the current pack's launcher (e.g. a Modrinth
 Fabric pack, or an **ATM10/NeoForge** install, reading a stale **ATM9/Forge**
-`variables.txt` and keeping the Forge egg). Two defenses:
+`variables.txt` and keeping the Forge egg). The defense:
 
-1. `stepDeleteFiles` **always** deletes `start.sh`/`run.sh`/`variables.txt`/`user_jvm_args.txt`
-   first — even when "Delete existing files" is off — since a new pack ships its own.
-2. `configureSelfContainedPack` **cross-checks** the launcher's parsed loader against the
-   pack's real loader (CurseForge `gameVersions`, carried on the plan via `cfLoaderMeta()`).
-   On mismatch it treats the launcher as stale, returns false, and lets path B switch the
-   egg using the correct loader.
+1. `stepDeleteFiles` **always** deletes `start.sh`/`run.sh`/`variables.txt`/`user_jvm_args.txt`,
+   the loader-metadata files `manifest.json`/`modrinth.index.json`, and stale `*-installer.jar`s
+   first — even when "Delete existing files" is off — since a new pack ships its own. This runs
+   BEFORE the pack is downloaded, so by the time `configureSelfContainedPack` / `detectLoader`
+   run, any such file on disk was extracted from THIS pack.
+
+   The `manifest.json`/`modrinth.index.json` clear is what fixes **installing over a leftover
+   pack without "Delete existing files"**: `detectLoader()` reads `/manifest.json`, so a stale
+   one from a previous install reports the WRONG loader. Real example — Forge 1.20.1
+   DeceasedCraft installed over a leftover NeoForge 1.21.1 manifest was detected as
+   "neoforge 21.1.221" and stayed on the NeoForge egg, even though its own
+   `forge-1.20.1-47.4.0-installer.jar` (via `detectInstallerJarMeta()`) had already set the
+   plan loader to `forge`.
+
+Because of that ordering, the on-disk launcher is **authoritative** for the loader. It is
+NOT cross-checked against the CurseForge `gameVersions` tag (`plan['loader']`) any more: that
+tag is the weaker signal, and for **Minecraft 1.20.1** — the one version where Forge and
+NeoForge coexist — packs are routinely tagged "NeoForge" (or both) even when they're Forge.
+The old cross-check discarded a Forge pack's real launcher on that mismatch and fell to path
+B, which (having no `manifest.json` for a server pack) followed the mistagged CF loader and
+installed a **Forge pack on the NeoForge egg**. Now `configureSelfContainedPack` just logs the
+discrepancy and trusts the launcher's loader.
 
 There are **three** server-pack shapes, tried in order:
 
@@ -186,11 +202,14 @@ When WE built the server from a CurseForge *client* manifest or a Modrinth `.mrp
    The loader-version variable is then written to whichever of
    `NEOFORGE_VERSION`/`FORGE_VERSION`/`BUILD_VERSION` (etc.) the egg actually defines.
    If no matching egg is installed, `importBundledLoaderEgg()` imports a bundled egg
-   from `resources/eggs/<loader>.json` (currently `neoforge.json`, the official
-   pelican-eggs NeoForge egg in PTDL_v2 form) via `EggImporterService::fromContent()`,
-   then re-scores. This is why a panel that only ships Forge/Fabric still gets the
-   NeoForge egg automatically on the first neoforge install. Best-effort — a failed
-   import just logs and leaves the egg unchanged.
+   from `resources/eggs/<loader>.json` (currently `neoforge.json` and `forge.json`, the
+   official pelican-eggs eggs in PTDL_v2 form) via `EggImporterService::fromContent()`,
+   then re-scores. This is why a panel that ships neither egg still gets the right one
+   automatically on the first install — e.g. a Forge pack landing on a panel whose only
+   modded egg is the NeoForge one auto-imported by a previous neoforge install would
+   otherwise be stuck on neoforge. Best-effort — a failed import just logs and leaves the
+   egg unchanged. (Fabric has no bundled egg yet, so a Fabric pack on a panel with no
+   Fabric egg still can't auto-switch.)
 3. **Switch egg + set vars** via Pelican's canonical `EggChangerService::handle(
    $server, $egg, keepOldVariables: false)`. This is important: it switches `egg_id`
    (and the default image/startup) **and deletes the old server variables** before
@@ -203,6 +222,20 @@ When WE built the server from a CurseForge *client* manifest or a Modrinth `.mrp
    `FORGE_VERSION`/`BUILD_VERSION` / `LOADER_VERSION`…) directly on the new
    `ServerVariable` rows. Java image chosen by `javaForMc()` (1.20.5+/1.21 → 21,
    1.17–1.20.4 → 17, ≤1.16 → 8).
+
+   **Forge vs NeoForge version format** — the two eggs disagree on what their version
+   variable expects, and getting it wrong silently breaks the install:
+   - **NeoForge** wants just the build number (`21.1.221`) in `NEOFORGE_VERSION` — the
+     Maven path is `.../neoforged/neoforge/21.1.221/`.
+   - **Forge** wants the *full* `<mc>-<build>` string (`1.20.1-47.4.0`) in `FORGE_VERSION`
+     — the egg downloads `.../minecraftforge/forge/${FORGE_VERSION}/forge-${FORGE_VERSION}-installer.jar`.
+
+     We carry the Forge **build** number (`47.4.0`, from the installer-jar filename / manifest
+     `modLoaders[0].id` / modrinth deps) and the MC version separately, so
+     `applyLoaderVariables()` stitches them into `<mc>-<build>` for `forge` only. Without it the
+     installer URL 404s, Forge never installs, and the server dies on start with
+     `Unable to access jarfile server.jar` (the egg's startup falls back to `-jar server.jar`
+     when no `unix_args.txt` was produced).
 4. **Reinstall** via `ReinstallServerService::handle($server)` so the egg installs
    the loader server.
 
