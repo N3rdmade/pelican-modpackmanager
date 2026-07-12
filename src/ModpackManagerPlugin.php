@@ -92,6 +92,18 @@ class ModpackManagerPlugin implements Plugin, HasPluginSettings
                         ->default(fn () => (bool) config('modpack-manager.store_metadata')),
                 ]),
 
+            Section::make('Sidebar')
+                ->description('Control where the Modpacks entry appears in the server-panel sidebar.')
+                ->schema([
+                    TextInput::make('navigation_sort')
+                        ->label('Sidebar position')
+                        ->numeric()
+                        ->step(1)
+                        ->placeholder('50')
+                        ->helperText('Sort weight for the sidebar entry. Lower numbers appear higher up; most core pages sit between 0 and 100. Default: 50.')
+                        ->default(fn () => (int) config('modpack-manager.navigation_sort')),
+                ]),
+
             Section::make('About')
                 ->schema([
                     Placeholder::make('info')
@@ -124,6 +136,10 @@ class ModpackManagerPlugin implements Plugin, HasPluginSettings
 
         if (array_key_exists('store_metadata', $data)) {
             $values['MODPACK_MANAGER_STORE_METADATA'] = $data['store_metadata'] ? 'true' : 'false';
+        }
+
+        if (array_key_exists('navigation_sort', $data)) {
+            $values['MODPACK_MANAGER_NAV_SORT'] = (string) (int) $data['navigation_sort'];
         }
 
         $this->writeToEnvironment($values);

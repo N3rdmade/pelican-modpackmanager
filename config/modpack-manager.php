@@ -30,6 +30,11 @@ return [
     // exists (e.g. records lost on a plugin re-install). Disabled by default.
     'store_metadata' => filter_var(env('MODPACK_MANAGER_STORE_METADATA', false), FILTER_VALIDATE_BOOLEAN),
 
+    // Sort weight for the "Modpacks" entry in the server-panel sidebar. Lower
+    // numbers appear higher in the list. Edited via the plugin settings UI and
+    // persisted as MODPACK_MANAGER_NAV_SORT.
+    'navigation_sort' => (int) env('MODPACK_MANAGER_NAV_SORT', 50),
+
     // Max download size in MB before job times out
     'download_timeout' => 300,
 

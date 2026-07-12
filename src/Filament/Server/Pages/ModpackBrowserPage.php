@@ -43,6 +43,15 @@ class ModpackBrowserPage extends Page
     protected static ?string $navigationLabel = 'Modpacks';
     protected static ?string $slug            = 'modpacks';
     protected static ?int    $navigationSort  = 50;
+
+    /**
+     * Sidebar position is admin-configurable via the plugin settings (persisted
+     * as MODPACK_MANAGER_NAV_SORT). Lower numbers sit higher in the sidebar.
+     */
+    public static function getNavigationSort(): ?int
+    {
+        return (int) config('modpack-manager.navigation_sort', static::$navigationSort);
+    }
     protected string         $view            = 'modpack-manager::filament.server.pages.modpack-browser-page';
 
     // ─── State ────────────────────────────────────────────────────────────────
