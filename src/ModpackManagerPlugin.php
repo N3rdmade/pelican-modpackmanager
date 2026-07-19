@@ -46,6 +46,20 @@ class ModpackManagerPlugin implements Plugin, HasPluginSettings
 
     // ─── HasPluginSettings ────────────────────────────────────────────────────
 
+    // Only the keys the settings form actually binds to; the rest of the config
+    // isn't user-editable. Panels older than beta36 ignore this and fall back to
+    // the ->default()s below.
+    public function getSettingsFormData(): array
+    {
+        return [
+            'curseforge_api_key' => config('modpack-manager.curseforge_api_key'),
+            'modrinth_token'     => config('modpack-manager.modrinth_token'),
+            'required_egg_tags'  => config('modpack-manager.required_egg_tags'),
+            'store_metadata'     => (bool) config('modpack-manager.store_metadata'),
+            'navigation_sort'    => (int) config('modpack-manager.navigation_sort'),
+        ];
+    }
+
     public function getSettingsForm(): array
     {
         return [
