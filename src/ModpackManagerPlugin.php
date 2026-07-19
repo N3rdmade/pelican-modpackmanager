@@ -128,7 +128,7 @@ class ModpackManagerPlugin implements Plugin, HasPluginSettings
                         ->step(1)
                         ->minValue(1)
                         ->placeholder('3')
-                        ->helperText('Wings limits each server to 3 simultaneous remote downloads by default. Keep this at or below that limit unless your Wings config allows more. Default: 3.')
+                        ->helperText('Number of files pulled onto the server at once during install. Each file is fetched by Wings directly from the source (e.g. CurseForge\'s CDN), so this caps both Wings\' simultaneous remote downloads and concurrent CurseForge fetches. 3 is a safe default; raise it only if you know your Wings config and API limits allow more.')
                         ->default(fn () => (int) config('modpack-manager.remote_download_concurrency')),
                 ]),
 

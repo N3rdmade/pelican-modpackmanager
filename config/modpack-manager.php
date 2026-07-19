@@ -38,8 +38,11 @@ return [
     // Max download size in MB before job times out
     'download_timeout' => 300,
 
-    // Wings limits each server to 3 simultaneous remote downloads by default.
-    // Keep this at or below that limit unless your Wings config is higher.
+    // How many files Wings pulls onto the server at once during install. Each
+    // file is fetched by Wings directly from its source (e.g. CurseForge's CDN),
+    // so this caps both Wings' simultaneous remote downloads and concurrent
+    // CurseForge fetches. Wings rejects extra simultaneous downloads past its own
+    // limit (3 by default); raise this only if your Wings config and API limits allow.
     'remote_download_concurrency' => max(1, (int) env('MODPACK_MANAGER_REMOTE_DOWNLOAD_CONCURRENCY', 3)),
 
     // ─── Scheduled update checks ───────────────────────────────────────────────
