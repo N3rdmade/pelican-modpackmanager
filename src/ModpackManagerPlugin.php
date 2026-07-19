@@ -57,6 +57,7 @@ class ModpackManagerPlugin implements Plugin, HasPluginSettings
             'required_egg_tags'  => config('modpack-manager.required_egg_tags'),
             'store_metadata'     => (bool) config('modpack-manager.store_metadata'),
             'navigation_sort'    => (int) config('modpack-manager.navigation_sort'),
+            'remote_download_concurrency' => (int) config('modpack-manager.remote_download_concurrency'),
         ];
     }
 
@@ -118,6 +119,19 @@ class ModpackManagerPlugin implements Plugin, HasPluginSettings
                         ->default(fn () => (int) config('modpack-manager.navigation_sort')),
                 ]),
 
+            Section::make('Downloads')
+                ->description('How many files each server downloads simultaneously when installing a modpack.')
+                ->schema([
+                    TextInput::make('remote_download_concurrency')
+                        ->label('Concurrent downloads')
+                        ->numeric()
+                        ->step(1)
+                        ->minValue(1)
+                        ->placeholder('3')
+                        ->helperText('Wings limits each server to 3 simultaneous remote downloads by default. Keep this at or below that limit unless your Wings config allows more. Default: 3.')
+                        ->default(fn () => (int) config('modpack-manager.remote_download_concurrency')),
+                ]),
+
             Section::make('About')
                 ->schema([
                     Placeholder::make('info')
@@ -154,6 +168,10 @@ class ModpackManagerPlugin implements Plugin, HasPluginSettings
 
         if (array_key_exists('navigation_sort', $data)) {
             $values['MODPACK_MANAGER_NAV_SORT'] = (string) (int) $data['navigation_sort'];
+        }
+
+        if (array_key_exists('remote_download_concurrency', $data)) {
+            $values['MODPACK_MANAGER_REMOTE_DOWNLOAD_CONCURRENCY'] = (string) max(1, (int) $data['remote_download_concurrency']);
         }
 
         $this->writeToEnvironment($values);
