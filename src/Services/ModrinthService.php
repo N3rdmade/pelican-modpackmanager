@@ -71,6 +71,42 @@ class ModrinthService
     }
 
     /**
+     * Search individual content (mods or plugins) by Modrinth project type.
+     * Same request/normalisation as search() but keyed to `project_type:mod` or
+     * `project_type:plugin`. The `loader` filter is folded into the `categories`
+     * facet — which is where Modrinth keeps both mod loaders (forge/fabric/…) and
+     * plugin platforms (paper/spigot/purpur/…), so it works for both types.
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    public function searchByType(string $query = '', string $projectType = 'mod', int $page = 0, int $pageSize = 20, array $filters = []): array
+    {
+        $facets = [['project_type:' . $projectType]];
+
+        if (!empty($filters['gameVersion'])) {
+            $facets[] = ['versions:' . $filters['gameVersion']];
+        }
+        if (!empty($filters['loader'])) {
+            $facets[] = ['categories:' . $filters['loader']];
+        }
+
+        $response = $this->client->get('/search', [
+            'query'  => $query,
+            'facets' => json_encode($facets),
+            'limit'  => $pageSize,
+            'offset' => $page * $pageSize,
+            'index'  => 'downloads',
+        ]);
+
+        if ($response->failed()) {
+            Log::error('[ModpackManager] Modrinth content search failed', ['status' => $response->status(), 'body' => $response->body()]);
+            throw new RuntimeException('Modrinth API request failed: ' . $response->status());
+        }
+
+        return array_map(fn (array $hit) => $this->normalizeHit($hit), $response->json('hits', []));
+    }
+
+    /**
      * Modpack categories from Modrinth, alphabetical — used to populate the
      * browser's category filter when Modrinth is the active provider. Cached a
      * day. Each entry is ['slug' => string, 'name' => string]; the slug is what

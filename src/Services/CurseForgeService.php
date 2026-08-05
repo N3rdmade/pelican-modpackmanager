@@ -15,6 +15,10 @@ class CurseForgeService
     private const GAME_ID    = 432;   // Minecraft
     private const CLASS_ID   = 4471;  // Modpacks
 
+    /** CurseForge Minecraft class (project type) IDs for individual-content search. */
+    public const CLASS_MODS    = 6;   // Minecraft Mods
+    public const CLASS_PLUGINS = 5;   // Bukkit Plugins
+
     /** Canonical loader slug → CurseForge modLoaderType enum. */
     private const LOADER_TYPES = [
         'forge'    => 1,
@@ -78,6 +82,45 @@ class CurseForgeService
         $data = $response->json('data', []);
 
         return array_map(fn (array $mod) => $this->normalizeMod($mod), $data);
+    }
+
+    /**
+     * Search for individual content (mods or Bukkit plugins) by CurseForge class id.
+     * Same shape/normalisation as search(), but targets classId 6 (Mc Mods) or 5
+     * (Bukkit Plugins) instead of the 4471 modpack class. Used by the Mods/Plugins page.
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    public function searchContent(string $query = '', int $classId = self::CLASS_MODS, int $page = 0, int $pageSize = 20, array $filters = []): array
+    {
+        $params = [
+            'gameId'       => self::GAME_ID,
+            'classId'      => $classId,
+            'searchFilter' => $query,
+            'sortField'    => 2,       // Popularity
+            'sortOrder'    => 'desc',
+            'index'        => $page * $pageSize,
+            'pageSize'     => $pageSize,
+        ];
+
+        if (!empty($filters['gameVersion'])) {
+            $params['gameVersion'] = $filters['gameVersion'];
+        }
+        // Loader only constrains mods; Bukkit plugins have no modLoaderType facet, and
+        // a plugin-platform slug (paper/spigot/…) simply isn't in LOADER_TYPES, so it's
+        // ignored here rather than mis-filtering.
+        if (!empty($filters['loader']) && ($loaderType = self::LOADER_TYPES[$filters['loader']] ?? null)) {
+            $params['modLoaderType'] = $loaderType;
+        }
+
+        $response = $this->client->get('/mods/search', $params);
+
+        if ($response->failed()) {
+            Log::error('[ModpackManager] CurseForge content search failed', ['status' => $response->status(), 'body' => $response->body()]);
+            throw new RuntimeException('CurseForge API request failed: ' . $response->status());
+        }
+
+        return array_map(fn (array $mod) => $this->normalizeMod($mod), $response->json('data', []));
     }
 
     /**
