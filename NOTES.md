@@ -202,14 +202,21 @@ When WE built the server from a CurseForge *client* manifest or a Modrinth `.mrp
    The loader-version variable is then written to whichever of
    `NEOFORGE_VERSION`/`FORGE_VERSION`/`BUILD_VERSION` (etc.) the egg actually defines.
    If no matching egg is installed, `importBundledLoaderEgg()` imports a bundled egg
-   from `resources/eggs/<loader>.json` (currently `neoforge.json` and `forge.json`, the
-   official pelican-eggs eggs in PTDL_v2 form) via `EggImporterService::fromContent()`,
-   then re-scores. This is why a panel that ships neither egg still gets the right one
-   automatically on the first install — e.g. a Forge pack landing on a panel whose only
-   modded egg is the NeoForge one auto-imported by a previous neoforge install would
-   otherwise be stuck on neoforge. Best-effort — a failed import just logs and leaves the
-   egg unchanged. (Fabric has no bundled egg yet, so a Fabric pack on a panel with no
-   Fabric egg still can't auto-switch.)
+   from `resources/eggs/<loader>.json` (currently `neoforge.json`, `forge.json` and
+   `fabric.json`, the official pelican-eggs eggs in PTDL_v2 form) via
+   `EggImporterService::fromContent()`, then re-scores. This is why a panel that ships
+   none of these eggs still gets the right one automatically on the first install — e.g.
+   a Forge pack landing on a panel whose only modded egg is the NeoForge one auto-imported
+   by a previous neoforge install would otherwise be stuck on neoforge. Best-effort — a
+   failed import just logs and leaves the egg unchanged. For **fabric**,
+   `applyLoaderVariables()` sets `MC_VERSION` to the pack's MC and forces BOTH the loader
+   (`LOADER_VERSION`) and installer (`FABRIC_VERSION`) versions to `latest`. Fabric's loader
+   is MC-agnostic/backward-compatible, so `latest` is always valid — and it avoids the trap
+   where the bundled egg lists `FABRIC_VERSION` (the *installer* version) before
+   `LOADER_VERSION`: pinning the pack's loader build there made the egg fetch a non-existent
+   `fabric-installer-<loaderbuild>.jar` (404). Writing `latest` to every matching var also
+   scrubs any stale/poisoned value a previous install left. (Quilt still has no bundled egg,
+   so a Quilt pack on a panel with no Quilt egg can't auto-switch.)
 3. **Switch egg + set vars** via Pelican's canonical `EggChangerService::handle(
    $server, $egg, keepOldVariables: false)`. This is important: it switches `egg_id`
    (and the default image/startup) **and deletes the old server variables** before

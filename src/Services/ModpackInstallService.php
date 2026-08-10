@@ -801,42 +801,69 @@ class ModpackInstallService
     {
         $applied = [];
 
+        // Write $val into the FIRST candidate (by the candidates' own priority order) that
+        // the egg actually defines. Iterating candidates — NOT the egg's variable list — is
+        // essential: the loader version must land in the RIGHT variable when an egg defines
+        // several of them. The bundled Fabric egg is the trap — it lists FABRIC_VERSION (the
+        // *installer* version) BEFORE LOADER_VERSION (the loader), so matching by egg order
+        // wrote the loader version into FABRIC_VERSION and the install script then fetched
+        // fabric-installer/<loader>/… which 404s. Candidate priority fixes that.
         $set = function (array $candidates, ?string $val) use ($server, $egg, &$applied) {
             if ($val === null || $val === '') {
                 return;
             }
-            foreach ($egg->variables as $v) {
-                if (in_array(strtoupper((string) $v->env_variable), $candidates, true)) {
-                    ServerVariable::query()->updateOrCreate(
-                        ['server_id' => $server->id, 'variable_id' => $v->id],
-                        ['variable_value' => $val]
-                    );
-                    $applied[$v->env_variable] = $val;
-                    return; // first matching variable wins
+            foreach ($candidates as $candidate) {
+                foreach ($egg->variables as $v) {
+                    if (strtoupper((string) $v->env_variable) === $candidate) {
+                        ServerVariable::query()->updateOrCreate(
+                            ['server_id' => $server->id, 'variable_id' => $v->id],
+                            ['variable_value' => $val]
+                        );
+                        $applied[$v->env_variable] = $val;
+                        return; // highest-priority candidate the egg defines wins
+                    }
                 }
             }
         };
 
         $set(['MC_VERSION', 'MINECRAFT_VERSION'], $mc);
 
-        // The Forge egg wants the FULL Maven version in FORGE_VERSION — it downloads
-        // .../forge/${FORGE_VERSION}/forge-${FORGE_VERSION}-installer.jar, and Forge's artifact
-        // is named "<mc>-<build>" (e.g. "1.20.1-47.4.0"). We carry the build number (47.4.0) and
-        // the MC version separately, so stitch them together. Without this the installer URL 404s
-        // and Forge never installs — the server then falls back to "-jar server.jar" (absent) and
-        // dies with a Java "unable to access jarfile" error. NeoForge is the opposite: its egg
-        // wants just the build number (21.1.221) in NEOFORGE_VERSION, so leave that untouched.
-        $loaderVer = $ver;
-        if ($loader === 'forge' && $ver !== null && $ver !== '' && $mc && !str_contains($ver, '-')) {
-            $loaderVer = "{$mc}-{$ver}";
-        }
+        if ($loader === 'fabric') {
+            // Fabric's loader is Minecraft-version-agnostic and backward-compatible, so
+            // pinning the pack's exact loader build buys nothing — and pinning is what caused
+            // the 404: the loader build (e.g. 0.19.3) was landing in FABRIC_VERSION, which the
+            // egg uses as the *installer* version, so it fetched a non-existent
+            // fabric-installer-0.19.3.jar. Force BOTH the loader and installer versions to
+            // "latest": the downloads are always valid, and writing every matching var (not
+            // just the first) also scrubs any stale/poisoned value a previous install left.
+            foreach ($egg->variables as $v) {
+                if (in_array(strtoupper((string) $v->env_variable), ['LOADER_VERSION', 'FABRIC_VERSION'], true)) {
+                    ServerVariable::query()->updateOrCreate(
+                        ['server_id' => $server->id, 'variable_id' => $v->id],
+                        ['variable_value' => 'latest']
+                    );
+                    $applied[$v->env_variable] = 'latest';
+                }
+            }
+        } else {
+            // The Forge egg wants the FULL Maven version in FORGE_VERSION — it downloads
+            // .../forge/${FORGE_VERSION}/forge-${FORGE_VERSION}-installer.jar, and Forge's artifact
+            // is named "<mc>-<build>" (e.g. "1.20.1-47.4.0"). We carry the build number (47.4.0) and
+            // the MC version separately, so stitch them together. Without this the installer URL 404s
+            // and Forge never installs — the server then falls back to "-jar server.jar" (absent) and
+            // dies with a Java "unable to access jarfile" error. NeoForge is the opposite: its egg
+            // wants just the build number (21.1.221) in NEOFORGE_VERSION, so leave that untouched.
+            $loaderVer = $ver;
+            if ($loader === 'forge' && $ver !== null && $ver !== '' && $mc && !str_contains($ver, '-')) {
+                $loaderVer = "{$mc}-{$ver}";
+            }
 
-        $set(match ($loader) {
-            'forge'    => ['FORGE_VERSION', 'BUILD_VERSION'],
-            'neoforge' => ['NEOFORGE_VERSION', 'FORGE_VERSION', 'BUILD_VERSION'],
-            'fabric'   => ['LOADER_VERSION', 'FABRIC_VERSION'],
-            default    => [],
-        }, $loaderVer);
+            $set(match ($loader) {
+                'forge'    => ['FORGE_VERSION', 'BUILD_VERSION'],
+                'neoforge' => ['NEOFORGE_VERSION', 'FORGE_VERSION', 'BUILD_VERSION'],
+                default    => [],
+            }, $loaderVer);
+        }
 
         if ($applied) {
             $record->appendLog('  Set variables: ' . json_encode($applied));
