@@ -162,10 +162,10 @@ class ModBrowserPage extends Page
      * is the strongest signal; the egg name/tags are the fallback. Anything else
      * (Paper/Purpur/Spigot/vanilla/proxies) is treated as a plugin platform.
      */
-    private function detectMode(Server $server): string
+    private static function detectMode(Server $server): string
     {
         $egg  = $server->egg;
-        $envs = $this->eggEnvVars($egg);
+        $envs = self::eggEnvVars($egg);
 
         foreach (['NEOFORGE_VERSION', 'FORGE_VERSION', 'FABRIC_VERSION', 'QUILT_VERSION'] as $var) {
             if (in_array($var, $envs, true)) {
@@ -173,7 +173,7 @@ class ModBrowserPage extends Page
             }
         }
 
-        $haystack = $this->eggHaystack($egg);
+        $haystack = self::eggHaystack($egg);
         foreach (['neoforge', 'forge', 'fabric', 'quilt'] as $kw) {
             if (preg_match('/\b' . preg_quote($kw, '/') . '\b/', $haystack)) {
                 return 'mods';
@@ -212,7 +212,7 @@ class ModBrowserPage extends Page
     }
 
     /** @return string[] Upper-cased env-variable names defined by the egg. */
-    private function eggEnvVars($egg): array
+    private static function eggEnvVars($egg): array
     {
         $out = [];
         foreach ($egg?->variables ?? [] as $v) {
@@ -222,7 +222,7 @@ class ModBrowserPage extends Page
     }
 
     /** Lower-cased "name + tags" blob for keyword matching. */
-    private function eggHaystack($egg): string
+    private static function eggHaystack($egg): string
     {
         return strtolower(trim(($egg?->name ?? '') . ' ' . implode(' ', $egg?->tags ?? [])));
     }
@@ -483,6 +483,47 @@ class ModBrowserPage extends Page
         }
 
         return (string) $this->versions[0]['id'];
+    }
+
+    /**
+     * The plain Minecraft release numbers a given version supports, newest first.
+     * CurseForge mixes loader names into gameVersions (e.g. ["1.20.1","NeoForge"]);
+     * Modrinth lists pure MC versions — either way we keep only "1.20.1"-shaped
+     * entries so the drawer can show exactly which MC versions a file is for.
+     *
+     * @param  array<string, mixed>  $ver
+     * @return string[]
+     */
+    public function supportedMcVersions(array $ver): array
+    {
+        $out = [];
+        foreach ($ver['gameVersions'] ?? [] as $g) {
+            $g = trim((string) $g);
+            if (preg_match('/^\d+\.\d+(?:\.\d+)?$/', $g)) {
+                $out[$g] = true;
+            }
+        }
+
+        $out = array_keys($out);
+        usort($out, 'version_compare');
+
+        return array_reverse($out);
+    }
+
+    /**
+     * Map of version-id → supported MC versions for the loaded drawer versions,
+     * so the view can show the selected version's compatibility reactively.
+     *
+     * @return array<string, string[]>
+     */
+    public function versionMcMap(): array
+    {
+        $map = [];
+        foreach ($this->versions as $v) {
+            $map[(string) ($v['id'] ?? '')] = $this->supportedMcVersions($v);
+        }
+
+        return $map;
     }
 
     public function loadVersions(): void
@@ -817,9 +858,14 @@ class ModBrowserPage extends Page
 
     public static function getNavigationLabel(): string
     {
-        // The label is static (chosen before a tenant is bound), so keep it neutral
-        // but recognisable. The in-page hero clarifies Mods vs Plugins per server.
-        return 'Mods';
+        // In the server panel the tenant (this server) is already bound when the
+        // sidebar is built, so we can reflect the egg: a plugin platform reads
+        // "Plugins", a mod loader reads "Mods". Falls back to "Mods" off-tenant.
+        $server = Filament::getTenant();
+
+        return ($server instanceof Server && self::detectMode($server) === 'plugins')
+            ? 'Plugins'
+            : 'Mods';
     }
 
     public function getTitle(): string

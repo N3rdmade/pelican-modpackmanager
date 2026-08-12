@@ -93,6 +93,17 @@
     .mpm-verselect select:focus { border-color:var(--mpm-accent); box-shadow:0 0 0 3px var(--mpm-accent-lo); }
     .mpm-verselect .lead { position:absolute; left:11px; width:15px; height:15px; color:var(--mpm-accent); pointer-events:none; }
     .mpm-verselect .caret { position:absolute; right:11px; width:14px; height:14px; color:var(--mpm-muted); pointer-events:none; }
+
+    /* Supported-MC-version row under the drawer version picker */
+    .mpm-verhint { display:flex; align-items:center; flex-wrap:wrap; gap:6px 8px; margin-top:10px; font-size:.76rem; }
+    .mpm-verhint__lbl { font-weight:700; color:var(--mpm-text-2); }
+    .mpm-verhint__chips { display:inline-flex; flex-wrap:wrap; gap:5px; }
+    .mpm-verchip { display:inline-flex; align-items:center; padding:2px 8px; border-radius:999px;
+        background:var(--mpm-surface-3); border:1px solid var(--mpm-border); color:var(--mpm-text-2);
+        font-size:.72rem; font-weight:700; font-family:ui-monospace,monospace; line-height:1.5; }
+    .mpm-verchip.is-match { background:color-mix(in srgb, var(--mpm-accent) 16%, transparent);
+        border-color:color-mix(in srgb, var(--mpm-accent) 45%, transparent); color:var(--mpm-accent); }
+    .mpm-verhint__warn { flex-basis:100%; color:var(--mpm-danger); font-weight:600; }
     .mpm-hero__eyebrow { display:inline-flex; align-items:center; gap:8px; font-size:.66rem; font-weight:800;
         letter-spacing:.16em; text-transform:uppercase; color:var(--mpm-accent); margin:0; }
     .mpm-hero__eyebrow svg { width:15px; height:15px; }
@@ -632,6 +643,7 @@
                         @elseif(empty($versions))
                             <p style="color:var(--mpm-danger);font-size:.85rem;margin:0;">No compatible versions available.</p>
                         @else
+                            @php $mcMap = $this->versionMcMap(); @endphp
                             <div class="mpm-select-wrap">
                                 <select class="mpm-select" x-model="$wire.selectedVersion">
                                     @foreach($versions as $ver)
@@ -639,11 +651,35 @@
                                             $label = $ver['displayName'] ?? $ver['versionNumber'] ?? $ver['name'] ?? $ver['fileName'] ?? $ver['id'];
                                             $date = isset($ver['datePublished']) ? \Carbon\Carbon::parse($ver['datePublished'])->format('M j, Y')
                                                   : (isset($ver['fileDate']) ? \Carbon\Carbon::parse($ver['fileDate'])->format('M j, Y') : '');
+                                            $mcList = $this->supportedMcVersions($ver);
+                                            $mcLabel = '';
+                                            if (!empty($mcList)) {
+                                                $shown   = array_slice($mcList, 0, 5);
+                                                $mcLabel = ' — MC ' . implode(', ', $shown) . (count($mcList) > 5 ? ' +' . (count($mcList) - 5) : '');
+                                            }
                                         @endphp
-                                        <option value="{{ $ver['id'] }}">{{ $label }}{{ $date ? ' • '.$date : '' }}</option>
+                                        <option value="{{ $ver['id'] }}">{{ $label }}{{ $date ? ' • '.$date : '' }}{{ $mcLabel }}</option>
                                     @endforeach
                                 </select>
                                 <svg class="caret" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+                            </div>
+
+                            {{-- Reactive compatibility row: which MC versions the picked file supports,
+                                 highlighting the one this server runs so there's no guessing. --}}
+                            <div class="mpm-verhint"
+                                 x-data="{ map: @js($mcMap), server: @js($filterVersion) }"
+                                 x-show="$wire.selectedVersion && (map[$wire.selectedVersion] || []).length"
+                                 x-cloak>
+                                <span class="mpm-verhint__lbl">Supports MC:</span>
+                                <span class="mpm-verhint__chips">
+                                    <template x-for="v in (map[$wire.selectedVersion] || [])" :key="v">
+                                        <span class="mpm-verchip" :class="{ 'is-match': server !== '' && v === server }" x-text="v"></span>
+                                    </template>
+                                </span>
+                                <span class="mpm-verhint__warn"
+                                      x-show="server !== '' && !(map[$wire.selectedVersion] || []).includes(server)">
+                                    Not listed for your {{ $filterVersion ?: 'server' }} — install only if you know it's compatible.
+                                </span>
                             </div>
                         @endif
                     </div>

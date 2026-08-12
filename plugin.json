@@ -2,7 +2,7 @@
     "id": "modpack-manager",
     "name": "Modpack Manager",
     "author": "cosmii02",
-    "version": "1.6.3",
+    "version": "1.6.4",
     "description": "Browse, install, and update Minecraft modpacks — plus individual mods and plugins — from CurseForge, Modrinth, FTB and ATLauncher directly from the server panel.",
     "category": "plugin",
     "namespace": "Cosmii02\\ModpackManager",
