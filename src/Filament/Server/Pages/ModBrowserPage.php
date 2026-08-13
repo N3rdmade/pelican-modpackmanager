@@ -317,7 +317,11 @@ class ModBrowserPage extends Page
         return '/' . $this->targetDir();
     }
 
-    /** Minecraft versions for the filter (live from CurseForge, static fallback). */
+    /**
+     * Minecraft versions for the filter. Prefer CurseForge's live list; if that's
+     * empty (e.g. no CF API key configured), fall back to Modrinth's public
+     * game-version list (needs no key); only if both fail use the static list.
+     */
     public function getFilterVersionOptions(): array
     {
         try {
@@ -326,8 +330,21 @@ class ModBrowserPage extends Page
             $versions = [];
         }
 
+        if (empty($versions)) {
+            try {
+                $versions = app(ModrinthService::class)->getMinecraftVersions();
+            } catch (Throwable) {
+                $versions = [];
+            }
+        }
+
+        // Last-resort static list (both live sources unavailable). Kept reasonably
+        // current — the newest release line plus the historically popular versions —
+        // so an offline panel still offers sensible choices.
         $versions = !empty($versions) ? $versions : [
-            '1.21.1', '1.21', '1.20.6', '1.20.4', '1.20.1', '1.20',
+            '26.2', '26.1.2', '26.1',
+            '1.21.11', '1.21.8', '1.21.4', '1.21.1', '1.21',
+            '1.20.6', '1.20.4', '1.20.1', '1.20',
             '1.19.2', '1.18.2', '1.16.5', '1.12.2', '1.7.10',
         ];
 

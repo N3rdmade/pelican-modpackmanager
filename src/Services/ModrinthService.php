@@ -31,6 +31,55 @@ class ModrinthService
     }
 
     /**
+     * The full list of released Minecraft versions, newest first, from Modrinth's
+     * public `tag/game_version` endpoint (no auth required). Used as the fallback
+     * source for the version filter when CurseForge has no key / is unavailable.
+     * Snapshots and pre-releases are dropped. Cached for a day; only non-empty
+     * results are cached. Returns [] on failure.
+     *
+     * @return string[]
+     */
+    public function getMinecraftVersions(): array
+    {
+        $cacheKey = 'modpack-manager:modrinth:mc-versions';
+
+        if ($cached = Cache::get($cacheKey)) {
+            return $cached;
+        }
+
+        try {
+            $response = $this->client->get('/tag/game_version');
+
+            if ($response->failed()) {
+                Log::warning('[ModpackManager] Modrinth game_version list failed', ['status' => $response->status()]);
+                return [];
+            }
+
+            $versions = [];
+            foreach ($response->json() ?? [] as $v) {
+                $str = $v['version'] ?? null;
+                // Numeric releases only — skip snapshots/betas ($v['version_type'] === 'release').
+                if (($v['version_type'] ?? null) === 'release'
+                    && is_string($str) && preg_match('/^\d+\.\d+(\.\d+)?$/', $str)) {
+                    $versions[$str] = true;
+                }
+            }
+
+            $versions = array_keys($versions);
+            usort($versions, fn ($a, $b) => version_compare($b, $a)); // newest first
+
+            if (!empty($versions)) {
+                Cache::put($cacheKey, $versions, now()->addDay());
+            }
+
+            return $versions;
+        } catch (Throwable $e) {
+            Log::warning('[ModpackManager] Modrinth game_version list error', ['error' => $e->getMessage()]);
+            return [];
+        }
+    }
+
+    /**
      * Search for modpacks on Modrinth.
      */
     public function search(string $query = '', int $page = 0, int $pageSize = 20, array $filters = []): array
