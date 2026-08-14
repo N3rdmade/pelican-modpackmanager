@@ -223,18 +223,28 @@ class ModrinthService
 
     /**
      * Get versions for a project, filtered to server-compatible loaders.
+     *
+     * Only the newest 50 versions are kept, so a project with a long release
+     * history can push a still-compatible older build off the end. Passing the
+     * browser's active Minecraft version narrows the request server-side so
+     * that build survives the cut.
+     *
+     * The loader list stays a superset on purpose — a Quilt server loads Fabric
+     * builds and NeoForge loads Forge ones, so narrowing it to the single
+     * selected loader would hide versions that actually run.
+     *
+     * @param  array{gameVersion?:string}  $filters
      */
-    public function getVersions(string $projectId, array $loaders = ['forge', 'fabric', 'quilt', 'neoforge']): array
+    public function getVersions(string $projectId, array $loaders = ['forge', 'fabric', 'quilt', 'neoforge'], array $filters = []): array
     {
-        $response = $this->client->get("/project/{$projectId}/version", [
-            'loaders' => json_encode($loaders),
-        ]);
+        $versions = $this->fetchVersions($projectId, $loaders, $filters);
 
-        if ($response->failed()) {
-            throw new RuntimeException("Modrinth: could not fetch versions for project {$projectId}");
+        // A project can support the server's loader without ever tagging that
+        // exact Minecraft point release. Fall back to the unnarrowed list so the
+        // picker still offers something; the drawer warns about the mismatch.
+        if (empty($versions) && !empty($filters['gameVersion'])) {
+            $versions = $this->fetchVersions($projectId, $loaders);
         }
-
-        $versions = $response->json([]);
 
         return array_values(array_map(fn (array $v) => [
             'id'           => $v['id'],
@@ -252,6 +262,31 @@ class ModrinthService
                 'sha1'     => $f['hashes']['sha1'] ?? null,
             ], $v['files'] ?? []),
         ], array_slice($versions, 0, 50)));
+    }
+
+    /**
+     * One raw `/project/{id}/version` response, optionally narrowed by Minecraft
+     * version. Modrinth expects both facets as JSON-encoded arrays.
+     *
+     * @param  array{gameVersion?:string}  $filters
+     */
+    private function fetchVersions(string $projectId, array $loaders, array $filters = []): array
+    {
+        $params = [
+            'loaders' => json_encode($loaders),
+        ];
+
+        if (!empty($filters['gameVersion'])) {
+            $params['game_versions'] = json_encode([$filters['gameVersion']]);
+        }
+
+        $response = $this->client->get("/project/{$projectId}/version", $params);
+
+        if ($response->failed()) {
+            throw new RuntimeException("Modrinth: could not fetch versions for project {$projectId}");
+        }
+
+        return $response->json([]);
     }
 
     /**

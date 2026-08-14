@@ -45,6 +45,16 @@ class CurseForgeService
     }
 
     /**
+     * CurseForge `modLoaderType` for a loader slug, or null when the slug isn't
+     * one CurseForge enumerates — plugin platforms (paper, spigot, …) land here,
+     * and the caller simply leaves the filter off.
+     */
+    private function loaderTypeId(?string $loader): ?int
+    {
+        return self::LOADER_TYPES[strtolower(trim((string) $loader))] ?? null;
+    }
+
+    /**
      * Search for modpacks on CurseForge.
      *
      * @return array{id:int, name:string, summary:string, downloadCount:int, logo:array, latestFiles:array, authors:array, dateModified:string}[]
@@ -65,7 +75,7 @@ class CurseForgeService
         if (!empty($filters['gameVersion'])) {
             $params['gameVersion'] = $filters['gameVersion'];
         }
-        if (!empty($filters['loader']) && ($loaderType = self::LOADER_TYPES[$filters['loader']] ?? null)) {
+        if ($loaderType = $this->loaderTypeId($filters['loader'] ?? null)) {
             $params['modLoaderType'] = $loaderType;
         }
         if (!empty($filters['category']) && is_numeric($filters['category'])) {
@@ -232,11 +242,46 @@ class CurseForgeService
     }
 
     /**
-     * Get the list of release files for a modpack (newest first). Each entry
-     * carries `serverPackFileId`, so the installer can resolve the official
-     * server pack at install time.
+     * Get the list of release files for a mod or modpack (newest first). Each
+     * entry carries `serverPackFileId`, so the installer can resolve the
+     * official server pack at install time.
+     *
+     * The endpoint only returns the newest page of files across every Minecraft
+     * version and loader, so a still-compatible older build can be pushed off
+     * the end by newer releases for other versions. Passing the browser's active
+     * filters narrows the request server-side so those builds survive.
+     *
+     * @param  array{gameVersion?:string, loader?:string}  $filters
      */
     public function getFiles(int $modId, array $filters = []): array
+    {
+        $files = $this->fetchFiles($modId, $filters);
+
+        // Narrowing is stricter than what a server can actually load: CurseForge
+        // matches only files carrying the tags, so cross-loader builds that do
+        // run (Fabric on Quilt, Forge on NeoForge) and older untagged uploads
+        // drop out entirely. Fall back to the unfiltered list rather than show
+        // an empty picker — the drawer already warns when the chosen file isn't
+        // listed for this server.
+        if (empty($files) && $filters !== []) {
+            $files = $this->fetchFiles($modId);
+        }
+
+        // Newest first.
+        usort($files, fn ($a, $b) => strcmp($b['fileDate'] ?? '', $a['fileDate'] ?? ''));
+
+        return array_values(array_map(
+            fn (array $file) => $this->normalizeFile($file),
+            array_slice($files, 0, 40)
+        ));
+    }
+
+    /**
+     * One raw `/mods/{id}/files` page, optionally narrowed by version/loader.
+     *
+     * @param  array{gameVersion?:string, loader?:string}  $filters
+     */
+    private function fetchFiles(int $modId, array $filters = []): array
     {
         $params = [
             'pageSize' => 50,
@@ -245,8 +290,7 @@ class CurseForgeService
         if (!empty($filters['gameVersion'])) {
             $params['gameVersion'] = $filters['gameVersion'];
         }
-
-        if (!empty($filters['loader']) && ($loaderType = self::LOADER_TYPES[strtolower($filters['loader'])] ?? null)) {
+        if ($loaderType = $this->loaderTypeId($filters['loader'] ?? null)) {
             $params['modLoaderType'] = $loaderType;
         }
 
@@ -256,15 +300,7 @@ class CurseForgeService
             throw new RuntimeException("CurseForge: could not fetch files for mod {$modId}");
         }
 
-        $files = $response->json('data', []);
-
-        // Newest first.
-        usort($files, fn ($a, $b) => strcmp($b['fileDate'] ?? '', $a['fileDate'] ?? ''));
-
-        return array_values(array_map(
-            fn (array $file) => $this->normalizeFile($file),
-            array_slice($files, 0, 40)
-        ));
+        return $response->json('data', []);
     }
 
     /**
