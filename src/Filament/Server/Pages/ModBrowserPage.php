@@ -555,7 +555,10 @@ class ModBrowserPage extends Page
             $id = $this->selectedItem['id'];
 
             if (($this->selectedItem['provider'] ?? null) === 'curseforge') {
-                $this->versions = app(CurseForgeService::class)->getFiles((int) $id);
+                $this->versions = app(CurseForgeService::class)->getFiles(
+                    (int) $id,
+                    $this->activeFilters()
+                );
             } else {
                 $loaders = $this->mode === 'plugins' ? self::PLUGIN_LOADERS : self::MOD_LOADERS;
                 $this->versions = app(ModrinthService::class)->getVersions((string) $id, $loaders);
