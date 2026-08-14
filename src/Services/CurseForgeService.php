@@ -236,11 +236,21 @@ class CurseForgeService
      * carries `serverPackFileId`, so the installer can resolve the official
      * server pack at install time.
      */
-    public function getFiles(int $modId): array
+    public function getFiles(int $modId, array $filters = []): array
     {
-        $response = $this->client->get("/mods/{$modId}/files", [
+        $params = [
             'pageSize' => 50,
-        ]);
+        ];
+
+        if (!empty($filters['gameVersion'])) {
+            $params['gameVersion'] = $filters['gameVersion'];
+        }
+
+        if (!empty($filters['loader']) && ($loaderType = self::LOADER_TYPES[strtolower($filters['loader'])] ?? null)) {
+            $params['modLoaderType'] = $loaderType;
+        }
+
+        $response = $this->client->get("/mods/{$modId}/files", $params);
 
         if ($response->failed()) {
             throw new RuntimeException("CurseForge: could not fetch files for mod {$modId}");
