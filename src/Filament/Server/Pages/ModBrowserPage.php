@@ -554,11 +554,16 @@ class ModBrowserPage extends Page
         try {
             $id = $this->selectedItem['id'];
 
+            // Hand both providers the active filters so the picker lists builds
+            // for this server rather than whatever released most recently across
+            // every Minecraft version.
+            $filters = $this->activeFilters();
+
             if (($this->selectedItem['provider'] ?? null) === 'curseforge') {
-                $this->versions = app(CurseForgeService::class)->getFiles((int) $id);
+                $this->versions = app(CurseForgeService::class)->getFiles((int) $id, $filters);
             } else {
                 $loaders = $this->mode === 'plugins' ? self::PLUGIN_LOADERS : self::MOD_LOADERS;
-                $this->versions = app(ModrinthService::class)->getVersions((string) $id, $loaders);
+                $this->versions = app(ModrinthService::class)->getVersions((string) $id, $loaders, $filters);
             }
 
             if (!empty($this->versions)) {
