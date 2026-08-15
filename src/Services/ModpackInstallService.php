@@ -3,10 +3,12 @@
 namespace Cosmii02\ModpackManager\Services;
 
 use App\Enums\EggFormat;
+use App\Models\Backup;
 use App\Models\Egg;
 use App\Models\Server;
 use App\Models\ServerVariable;
 use App\Repositories\Daemon\DaemonFileRepository;
+use App\Services\Backups\DeleteBackupService;
 use App\Services\Backups\InitiateBackupService;
 use App\Services\Eggs\EggChangerService;
 use App\Services\Eggs\Sharing\EggImporterService;
@@ -58,8 +60,10 @@ class ModpackInstallService
         $this->fileRepo->setServer($server);
 
         try {
+            $this->stepDeleteSelectedBackups($record, $options);
             $this->stepSaveConfig($record);
             $this->stepCreateBackup($record, $options);
+            $this->stepDeleteWorlds($record, $options);
             $this->stepDeleteFiles($record, $options);
 
             $plan = $this->resolvePlan($record, $spec);
@@ -188,6 +192,109 @@ class ModpackInstallService
     }
 
     // ─── Steps ──────────────────────────────────────────────────────────────
+
+    private function stepDeleteSelectedBackups(ModpackInstall $record, array $options): void
+    {
+        if (!($options['delete_backups'] ?? false)) {
+            return;
+        }
+
+        $ids = array_values(array_unique(array_filter(
+            array_map('intval', $options['backup_ids'] ?? []),
+            fn (int $id) => $id > 0
+        )));
+
+        if (empty($ids)) {
+            $record->appendLog('Backup deletion enabled, but no backups were selected.');
+            return;
+        }
+
+        $backups = Backup::query()
+            ->where('server_id', $record->server_id)
+            ->whereIn('id', $ids)
+            ->get()
+            ->keyBy('id');
+
+        if ($backups->count() !== count($ids)) {
+            throw new RuntimeException('One or more selected backups do not belong to this server or no longer exist. No backups were deleted.');
+        }
+
+        foreach ($ids as $id) {
+            $backup = $backups->get($id);
+
+            if ($backup->is_locked) {
+                throw new RuntimeException('Backup "' . $backup->name . '" is locked and cannot be deleted. No backups were deleted.');
+            }
+
+            if ($backup->completed_at === null) {
+                throw new RuntimeException('Backup "' . $backup->name . '" is still running and cannot be deleted. No backups were deleted.');
+            }
+        }
+
+        $record->appendLog('Deleting selected backups from this server…');
+        $service = app(DeleteBackupService::class);
+
+        foreach ($ids as $id) {
+            $backup = $backups->get($id);
+            $name = $backup->name;
+            $service->handle($backup);
+            $record->appendLog('  Deleted backup: ' . $name);
+        }
+    }
+
+    private function stepDeleteWorlds(ModpackInstall $record, array $options): void
+    {
+        if (!($options['delete_world'] ?? false)) {
+            return;
+        }
+
+        try {
+            $properties = (string) $this->fileRepo->getContent('/server.properties', 1024 * 1024);
+        } catch (Throwable $e) {
+            throw new RuntimeException('World deletion was requested, but server.properties could not be read. Nothing was deleted.', 0, $e);
+        }
+
+        if (!preg_match('/^\s*level-name\s*=\s*(.+?)\s*$/m', $properties, $matches)) {
+            throw new RuntimeException('World deletion was requested, but level-name could not be found in server.properties. Nothing was deleted.');
+        }
+
+        $levelName = trim((string) $matches[1]);
+
+        if (
+            $levelName === ''
+            || $levelName === '.'
+            || $levelName === '..'
+            || str_contains($levelName, '/')
+            || str_contains($levelName, '\\')
+            || str_contains($levelName, "\0")
+        ) {
+            throw new RuntimeException('World deletion was requested, but level-name is not a safe root-level world folder. Nothing was deleted.');
+        }
+
+        $candidates = [$levelName, $levelName . '_nether', $levelName . '_the_end'];
+        $targets = [];
+
+        foreach ($this->fileRepo->getDirectory('/') as $entry) {
+            $name = (string) ($entry['name'] ?? '');
+            $isDirectory = (bool) ($entry['directory'] ?? false);
+
+            if ($isDirectory && in_array($name, $candidates, true)) {
+                $targets[] = $name;
+            }
+        }
+
+        if (empty($targets)) {
+            $record->appendLog('World deletion enabled, but no active world folders were found.');
+            return;
+        }
+
+        $record->appendLog('Deleting active world folders: ' . implode(', ', $targets));
+        $this->fileRepo->deleteFiles('/', $targets);
+
+        foreach ($targets as $target) {
+            $record->appendLog('  Deleted world folder: /' . $target . '/');
+        }
+    }
 
     private function stepSaveConfig(ModpackInstall $record): void
     {
@@ -771,6 +878,29 @@ class ModpackInstallService
             return null;
         }
 
+        $tags = is_array($egg->tags) ? $egg->tags : [];
+        $requiredTags = array_values(array_filter(
+            array_map(fn ($tag) => trim((string) $tag), config('modpack-manager.required_egg_tags', ['minecraft'])),
+            fn ($tag) => $tag !== ''
+        ));
+        $normalizedTags = array_map(fn ($tag) => strtolower(trim((string) $tag)), $tags);
+        $changedTags = false;
+
+        foreach ($requiredTags as $requiredTag) {
+            $normalized = strtolower($requiredTag);
+            if (!in_array($normalized, $normalizedTags, true)) {
+                $tags[] = $requiredTag;
+                $normalizedTags[] = $normalized;
+                $changedTags = true;
+            }
+        }
+
+        if ($changedTags) {
+            $egg->tags = array_values(array_unique($tags));
+            $egg->save();
+            $egg->refresh();
+        }
+
         if ((int) $server->egg_id === (int) $egg->id) {
             $record->appendLog("  Server already on the “{$egg->name}” egg.");
             $this->applyLoaderVariables($record, $server, $egg, $loader, $mc, $ver);
@@ -1221,15 +1351,18 @@ class ModpackInstallService
     private function javaForMc(?string $mc): int
     {
         if (!$mc || !preg_match('/^(\d+)\.(\d+)(?:\.(\d+))?/', $mc, $m)) {
-            return 17; // safe default for most modded packs
+            return 17;
         }
 
+        $major = (int) $m[1];
         $minor = (int) $m[2];
         $patch = (int) ($m[3] ?? 0);
 
-        if ($minor >= 21)  return 21;
+        if ($major >= 26) return 25;
+        if ($major !== 1) return 17;
+        if ($minor >= 21) return 21;
         if ($minor === 20) return $patch >= 5 ? 21 : 17;
-        if ($minor >= 17)  return 17;
+        if ($minor >= 17) return 17;
 
         return 8;
     }
@@ -1513,19 +1646,82 @@ class ModpackInstallService
     private function mergeOverrides(ModpackInstall $record): void
     {
         try {
-            $entries = $this->fileRepo->getDirectory('/overrides');
-            $names   = collect($entries)->pluck('name')->filter()->values()->all();
+            $moved = $this->mergeRemoteDirectory('/overrides', '/');
+            $this->fileRepo->deleteFiles('/', ['overrides']);
 
-            if (empty($names)) {
-                return;
+            if ($moved > 0) {
+                $record->appendLog('  Merged ' . $moved . ' file(s) from overrides/ into the server root.');
             }
-
-            $moves = array_map(fn ($n) => ['from' => "overrides/{$n}", 'to' => $n], $names);
-            $this->fileRepo->renameFiles('/', $moves);
-            $record->appendLog('  Merged ' . count($names) . ' item(s) from overrides/ into the server root.');
         } catch (Throwable $e) {
             $record->appendLog('  Overrides merge skipped (' . $e->getMessage() . ')');
         }
+    }
+
+    private function mergeRemoteDirectory(string $sourceDir, string $targetDir): int
+    {
+        $entries = $this->fileRepo->getDirectory($sourceDir);
+        $moved = 0;
+
+        foreach ($entries as $entry) {
+            $name = (string) ($entry['name'] ?? '');
+            if ($name === '' || $name === '.' || $name === '..') {
+                continue;
+            }
+
+            if ($targetDir === '/' && in_array($name, config('modpack-manager.preserved_files', []), true)) {
+                continue;
+            }
+
+            $sourcePath = rtrim($sourceDir, '/') . '/' . $name;
+            $targetPath = rtrim($targetDir, '/') . '/' . $name;
+
+            if ((bool) ($entry['directory'] ?? false)) {
+                $this->ensureRemoteDirectory($targetDir, $name);
+                $moved += $this->mergeRemoteDirectory($sourcePath, $targetPath);
+                continue;
+            }
+
+            $this->replaceRemoteEntry($sourcePath, $targetPath);
+            $moved++;
+        }
+
+        return $moved;
+    }
+
+    private function ensureRemoteDirectory(string $parentDir, string $name): void
+    {
+        foreach ($this->fileRepo->getDirectory($parentDir) as $entry) {
+            if (($entry['name'] ?? null) !== $name) {
+                continue;
+            }
+
+            if ((bool) ($entry['directory'] ?? false)) {
+                return;
+            }
+
+            $this->fileRepo->deleteFiles($parentDir, [$name]);
+            break;
+        }
+
+        $this->fileRepo->createDirectory($name, $parentDir);
+    }
+
+    private function replaceRemoteEntry(string $sourcePath, string $targetPath): void
+    {
+        $targetParent = dirname($targetPath);
+        $targetName = basename($targetPath);
+
+        foreach ($this->fileRepo->getDirectory($targetParent) as $entry) {
+            if (($entry['name'] ?? null) === $targetName) {
+                $this->fileRepo->deleteFiles($targetParent, [$targetName]);
+                break;
+            }
+        }
+
+        $this->fileRepo->renameFiles('/', [[
+            'from' => ltrim($sourcePath, '/'),
+            'to'   => ltrim($targetPath, '/'),
+        ]]);
     }
 
     // ─── Wings helpers ──────────────────────────────────────────────────────

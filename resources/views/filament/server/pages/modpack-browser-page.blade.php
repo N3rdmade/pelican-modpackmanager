@@ -458,6 +458,25 @@
     .mpm-opt input:checked + .mpm-opt__track::after { transform:translateX(19px); }
     .mpm-opt__title { font-size:.87rem; font-weight:700; }
     .mpm-opt__desc { font-size:.75rem; color:var(--mpm-muted); margin-top:2px; line-height:1.4; }
+    .mpm-opt--danger input:checked + .mpm-opt__track { background:var(--mpm-danger); border-color:transparent; }
+    .mpm-danger-panel { padding:14px; border-radius:13px; border:1px solid color-mix(in srgb, var(--mpm-danger) 42%, var(--mpm-border));
+        background:color-mix(in srgb, var(--mpm-danger) 8%, var(--mpm-surface-2)); }
+    .mpm-danger-panel__title { display:flex; align-items:center; gap:8px; color:var(--mpm-danger); font-size:.8rem; font-weight:800; text-transform:uppercase; letter-spacing:.06em; }
+    .mpm-danger-panel__title svg { width:16px; height:16px; flex-shrink:0; }
+    .mpm-danger-panel__text { margin:7px 0 0; color:var(--mpm-text-2); font-size:.75rem; line-height:1.45; }
+    .mpm-targets { display:flex; flex-wrap:wrap; gap:7px; margin-top:11px; }
+    .mpm-target { font-family:ui-monospace,monospace; font-size:.69rem; padding:5px 9px; border-radius:7px;
+        color:var(--mpm-text-2); background:var(--mpm-surface-3); border:1px solid var(--mpm-border-2); }
+    .mpm-backup-list { display:flex; flex-direction:column; gap:8px; margin-top:12px; max-height:240px; overflow-y:auto; }
+    .mpm-backup-row { display:grid; grid-template-columns:18px minmax(0,1fr) auto; gap:10px; align-items:center; padding:10px 11px;
+        border-radius:10px; background:var(--mpm-surface); border:1px solid var(--mpm-border); cursor:pointer; }
+    .mpm-backup-row:hover { border-color:color-mix(in srgb, var(--mpm-danger) 45%, var(--mpm-border-2)); }
+    .mpm-backup-row.is-disabled { opacity:.5; cursor:not-allowed; }
+    .mpm-backup-row input { width:16px; height:16px; margin:0; accent-color:var(--mpm-danger); }
+    .mpm-backup-row__name { display:block; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:.78rem; font-weight:700; color:var(--mpm-text); }
+    .mpm-backup-row__meta { display:block; margin-top:2px; font-size:.68rem; color:var(--mpm-muted); }
+    .mpm-backup-row__state { font-size:.67rem; font-weight:800; color:var(--mpm-muted); white-space:nowrap; }
+    .mpm-critical { margin-top:11px; padding:9px 10px; border-radius:9px; color:#fff; background:var(--mpm-danger); font-size:.72rem; font-weight:700; line-height:1.4; }
 
     .mpm-drawer__foot { flex-shrink:0; padding:18px 22px; border-top:1px solid var(--mpm-border); background:var(--mpm-surface); display:flex; flex-direction:column; gap:12px; }
     .mpm-drawer__actions { display:flex; gap:11px; }
@@ -972,7 +991,7 @@
             {{-- Drawer body --}}
             <div class="mpm-drawer__body"
                  wire:key="drawer-{{ $selectedModpack['provider'] ?? '' }}-{{ $selectedModpack['id'] ?? '' }}"
-                 x-init="$wire.loadVersions()">
+                 x-init="$wire.loadVersions(); $wire.loadInstallTargets()">
 
                 <div>
                     <label class="mpm-label">Version</label>
@@ -1014,7 +1033,7 @@
                 </div>
 
                 <label class="mpm-opt">
-                    <input type="checkbox" x-model="$wire.createBackup">
+                    <input type="checkbox" x-model="$wire.createBackup" @disabled(!$canCreateBackups)>
                     <span class="mpm-opt__track"></span>
                     <span>
                         <span class="mpm-opt__title">Create a backup first</span>
@@ -1030,6 +1049,72 @@
                         <span class="mpm-opt__desc">Removes old mods/config before install (preserved files above are kept).</span>
                     </span>
                 </label>
+
+                <label class="mpm-opt mpm-opt--danger">
+                    <input type="checkbox" x-model="$wire.deleteWorld">
+                    <span class="mpm-opt__track"></span>
+                    <span>
+                        <span class="mpm-opt__title">Delete existing world</span>
+                        <span class="mpm-opt__desc">Permanently deletes only the active world folders detected from this server's server.properties.</span>
+                    </span>
+                </label>
+
+                <div class="mpm-danger-panel" x-show="$wire.deleteWorld" x-cloak>
+                    <div class="mpm-danger-panel__title">
+                        <svg fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
+                        World deletion
+                    </div>
+                    @if(empty($detectedWorlds))
+                        <p class="mpm-danger-panel__text">No active world folder is currently detected. The installer will never guess a world name or search unrelated folders.</p>
+                    @else
+                        <p class="mpm-danger-panel__text">Only these exact folders are eligible for deletion:</p>
+                        <div class="mpm-targets">
+                            @foreach($detectedWorlds as $world)
+                                <span class="mpm-target">/{{ $world }}/</span>
+                            @endforeach
+                        </div>
+                    @endif
+                    <div class="mpm-critical" x-show="!$wire.createBackup" x-cloak>No new pre-install backup will be created. Deleted world data cannot be recovered through Pelican.</div>
+                </div>
+
+                <label class="mpm-opt mpm-opt--danger">
+                    <input type="checkbox" x-model="$wire.deleteBackups" @disabled(!$canReadBackups || !$canDeleteBackups)>
+                    <span class="mpm-opt__track"></span>
+                    <span>
+                        <span class="mpm-opt__title">Delete existing backups</span>
+                        <span class="mpm-opt__desc">Permanently removes only the specific backups you select below from this server.</span>
+                    </span>
+                </label>
+
+                <div class="mpm-danger-panel" x-show="$wire.deleteBackups" x-cloak>
+                    <div class="mpm-danger-panel__title">
+                        <svg fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
+                        Permanent backup deletion
+                    </div>
+                    <p class="mpm-danger-panel__text">Only backups belonging to this server are shown. Locked or currently running backups cannot be selected.</p>
+                    <div class="mpm-backup-list">
+                        @forelse($availableBackups as $backup)
+                            @php
+                                $bytes = (int) ($backup['bytes'] ?? 0);
+                                $size = $bytes >= 1073741824
+                                    ? number_format($bytes / 1073741824, 2) . ' GB'
+                                    : number_format($bytes / 1048576, 1) . ' MB';
+                                $disabled = $backup['locked'] || $backup['inProgress'];
+                            @endphp
+                            <label class="mpm-backup-row {{ $disabled ? 'is-disabled' : '' }}">
+                                <input type="checkbox" value="{{ $backup['id'] }}" wire:model.live="selectedBackupIds" @disabled($disabled)>
+                                <span style="min-width:0;">
+                                    <span class="mpm-backup-row__name">{{ $backup['name'] }}</span>
+                                    <span class="mpm-backup-row__meta">{{ $backup['createdAt'] }} · {{ $size }}</span>
+                                </span>
+                                <span class="mpm-backup-row__state">{{ $backup['locked'] ? 'Locked' : ($backup['inProgress'] ? 'Running' : 'Select') }}</span>
+                            </label>
+                        @empty
+                            <p class="mpm-danger-panel__text" style="margin-top:0;">No backups exist for this server.</p>
+                        @endforelse
+                    </div>
+                    <div class="mpm-critical" x-show="!$wire.createBackup" x-cloak>No replacement backup will be created before installation. Any selected backups will be permanently removed.</div>
+                </div>
             </div>
 
             {{-- Drawer footer (sticky) --}}
