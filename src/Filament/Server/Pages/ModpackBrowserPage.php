@@ -3,6 +3,7 @@
 namespace Cosmii02\ModpackManager\Filament\Server\Pages;
 
 use App\Enums\SubuserPermission;
+use App\Models\Backup;
 use App\Models\Server;
 use App\Repositories\Daemon\DaemonFileRepository;
 use Cosmii02\ModpackManager\Jobs\InstallModpackJob;
@@ -81,8 +82,13 @@ class ModpackBrowserPage extends Page
     public array   $versions        = [];
     public bool    $versionsLoading = false;
     public ?string $selectedVersion = null;
-    public bool    $deleteExisting  = false;
-    public bool    $createBackup    = true;
+    public bool    $deleteExisting    = false;
+    public bool    $createBackup      = true;
+    public bool    $deleteWorld       = false;
+    public bool    $deleteBackups     = false;
+    public array   $selectedBackupIds = [];
+    public array   $availableBackups  = [];
+    public array   $detectedWorlds    = [];
 
     // Installation progress state
     public bool   $isInstalling  = false;
@@ -107,7 +113,10 @@ class ModpackBrowserPage extends Page
     public array $lastLogMeta  = [];      // ['name', 'version', 'status', 'time']
 
     // Whether the current user may install/update (drives the UI; enforced server-side too).
-    public bool $canManage = false;
+    public bool $canManage        = false;
+    public bool $canReadBackups   = false;
+    public bool $canCreateBackups = false;
+    public bool $canDeleteBackups = false;
 
     // ─── Authorization ──────────────────────────────────────────────────────────
 
@@ -167,7 +176,10 @@ class ModpackBrowserPage extends Page
     {
         $server = $this->getServer();
 
-        $this->canManage = $this->userCanManage();
+        $this->canManage        = $this->userCanManage();
+        $this->canReadBackups   = (bool) user()?->can(SubuserPermission::BackupRead, $server);
+        $this->canCreateBackups = (bool) user()?->can(SubuserPermission::BackupCreate, $server);
+        $this->canDeleteBackups = (bool) user()?->can(SubuserPermission::BackupDelete, $server);
 
         // Is there a finished install whose log we can offer via "Show last install log"?
         $this->hasLastLog = ModpackInstall::where('server_id', $server->id)
@@ -416,9 +428,14 @@ class ModpackBrowserPage extends Page
         $this->versions         = [];
         $this->selectedVersion  = null;
         $this->versionsLoading  = true;
-        $this->deleteExisting   = false;
-        $this->createBackup     = true;
-        $this->showModal        = true;
+        $this->deleteExisting    = false;
+        $this->createBackup      = $this->canCreateBackups;
+        $this->deleteWorld       = false;
+        $this->deleteBackups     = false;
+        $this->selectedBackupIds = [];
+        $this->availableBackups  = [];
+        $this->detectedWorlds    = [];
+        $this->showModal         = true;
 
         // Don't block opening the modal on the version fetch — the modal pops up
         // instantly with its loading state, and the version list is fetched in a
@@ -428,10 +445,15 @@ class ModpackBrowserPage extends Page
 
     public function closeModal(): void
     {
-        $this->showModal       = false;
-        $this->selectedModpack = null;
-        $this->versions        = [];
-        $this->selectedVersion = null;
+        $this->showModal         = false;
+        $this->selectedModpack   = null;
+        $this->versions          = [];
+        $this->selectedVersion   = null;
+        $this->deleteWorld       = false;
+        $this->deleteBackups     = false;
+        $this->selectedBackupIds = [];
+        $this->availableBackups  = [];
+        $this->detectedWorlds    = [];
     }
 
     /**
@@ -483,6 +505,18 @@ class ModpackBrowserPage extends Page
 
         $server   = $this->getServer();
         $provider = $this->selectedModpack['provider'];
+
+        if ($this->createBackup) {
+            abort_unless(user()?->can(SubuserPermission::BackupCreate, $server), 403);
+        }
+
+        if ($this->deleteBackups) {
+            abort_unless(
+                user()?->can(SubuserPermission::BackupRead, $server)
+                    && user()?->can(SubuserPermission::BackupDelete, $server),
+                403
+            );
+        }
 
         // Build an install "spec" the job uses to resolve the files to install.
         // CurseForge resolves the server pack (or builds from the client pack);
@@ -550,6 +584,13 @@ class ModpackBrowserPage extends Page
 
         // Capture the name before closeModal() nulls out $selectedModpack.
         $modpackName = $this->selectedModpack['name'];
+        $installOptions = [
+            'delete_existing' => $this->deleteExisting,
+            'create_backup'   => $this->createBackup,
+            'delete_world'    => $this->deleteWorld,
+            'delete_backups'  => $this->deleteBackups,
+            'backup_ids'      => array_values(array_unique(array_map('intval', $this->selectedBackupIds))),
+        ];
 
         $this->closeModal();
 
@@ -563,10 +604,7 @@ class ModpackBrowserPage extends Page
         $this->installStartedAt = (int) ($record->created_at->valueOf());
         $this->installElapsed   = 0;
 
-        InstallModpackJob::dispatch($record->id, [
-            'delete_existing' => $this->deleteExisting,
-            'create_backup'   => $this->createBackup,
-        ])->onQueue('default');
+        InstallModpackJob::dispatch($record->id, $installOptions)->onQueue('default');
 
         Notification::make()
             ->title("Installing {$modpackName}…")
@@ -766,6 +804,80 @@ class ModpackBrowserPage extends Page
         /** @var Server $server */
         $server = Filament::getTenant();
         return $server;
+    }
+
+    public function loadInstallTargets(): void
+    {
+        if (!$this->showModal) {
+            return;
+        }
+
+        $server = $this->getServer();
+
+        $this->availableBackups = user()?->can(SubuserPermission::BackupRead, $server)
+            ? Backup::query()
+                ->where('server_id', $server->id)
+                ->orderByDesc('created_at')
+                ->get()
+                ->map(fn (Backup $backup) => [
+                    'id'         => $backup->id,
+                    'name'       => $backup->name,
+                    'bytes'      => $backup->bytes,
+                    'createdAt'  => $backup->created_at?->format('M j, Y g:i A') ?? 'Unknown date',
+                    'locked'     => $backup->is_locked,
+                    'inProgress' => $backup->completed_at === null,
+                ])
+                ->values()
+                ->all()
+            : [];
+
+        $this->detectedWorlds = [];
+
+        try {
+            $repo = app(DaemonFileRepository::class);
+            $repo->setServer($server);
+            $properties = (string) $repo->getContent('/server.properties', 1024 * 1024);
+            $levelName = $this->extractLevelName($properties);
+
+            if ($levelName === null) {
+                return;
+            }
+
+            $candidates = [$levelName, $levelName . '_nether', $levelName . '_the_end'];
+
+            foreach ($repo->getDirectory('/') as $entry) {
+                $name = (string) ($entry['name'] ?? '');
+                $isDirectory = (bool) ($entry['directory'] ?? false);
+
+                if ($isDirectory && in_array($name, $candidates, true)) {
+                    $this->detectedWorlds[] = $name;
+                }
+            }
+        } catch (Throwable) {
+            $this->detectedWorlds = [];
+        }
+    }
+
+    private function extractLevelName(string $properties): ?string
+    {
+        if (!preg_match('/^\s*level-name\s*=\s*(.+?)\s*$/m', $properties, $matches)) {
+            return null;
+        }
+
+        $levelName = trim((string) $matches[1]);
+
+        if (
+            $levelName === ''
+            || $levelName === '.'
+            || $levelName === '..'
+            || str_contains($levelName, '/')
+            || str_contains($levelName, '\\')
+            || str_contains($levelName, "\0")
+        ) {
+            return null;
+        }
+
+        return $levelName;
     }
 
     /**

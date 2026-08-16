@@ -1,11 +1,13 @@
 name: Build & Release
 
 on:
-  push:                # every push — version in plugin.json drives the tag
-  workflow_dispatch:    # …or run it manually from the Actions tab
+  push:
+    branches:
+      - main
+  workflow_dispatch:
 
 permissions:
-  contents: write       # needed to create releases / upload assets
+  contents: write
 
 jobs:
   release:
@@ -29,7 +31,6 @@ jobs:
         run: |
           set -euo pipefail
           rm -rf build && mkdir -p build/modpack-manager
-          # Copy everything except VCS/CI cruft into the top-level plugin folder
           rsync -a \
             --exclude '.git' \
             --exclude '.github' \
@@ -41,7 +42,6 @@ jobs:
           ( cd build && zip -r -q -X ../modpack-manager.zip modpack-manager -x '*.DS_Store' )
           echo "--- zip contents (top level) ---"
           unzip -l modpack-manager.zip | head -n 20
-          # Sanity check: plugin.json must be at modpack-manager/plugin.json
           unzip -l modpack-manager.zip | grep -q 'modpack-manager/plugin.json'
 
       - name: Create / update release
