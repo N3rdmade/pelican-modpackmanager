@@ -27,6 +27,21 @@ class CurseForgeService
         'neoforge' => 6,
     ];
 
+
+    /** Common category slugs used by the combined browser -> CurseForge category IDs. */
+    private const CATEGORY_IDS = [
+        'adventure'   => 4475,
+        'technology'  => 4472,
+        'magic'       => 4473,
+        'quests'      => 4478,
+        'combat'      => 4483,
+        'exploration' => 4476,
+        'skyblock'    => 4477,
+        'lightweight' => 4481,
+        'sci-fi'      => 4474,
+        'hardcore'    => 4479,
+    ];
+
     private PendingRequest $client;
 
     public function __construct()
@@ -61,37 +76,77 @@ class CurseForgeService
      */
     public function search(string $query = '', int $page = 0, int $pageSize = 20, array $filters = []): array
     {
-        $params = [
+        $baseParams = [
             'gameId'       => self::GAME_ID,
             'classId'      => self::CLASS_ID,
             'searchFilter' => $query,
-            'sortField'    => 2,       // Popularity
+            'sortField'    => 2,
             'sortOrder'    => 'desc',
-            'index'        => $page * $pageSize,
-            'pageSize'     => $pageSize,
         ];
 
-        // Optional facet filters (Minecraft version / loader / modpack category).
         if (!empty($filters['gameVersion'])) {
-            $params['gameVersion'] = $filters['gameVersion'];
+            $baseParams['gameVersion'] = $filters['gameVersion'];
         }
-        if ($loaderType = $this->loaderTypeId($filters['loader'] ?? null)) {
-            $params['modLoaderType'] = $loaderType;
-        }
-        if (!empty($filters['category']) && is_numeric($filters['category'])) {
-            $params['categoryId'] = (int) $filters['category']; // a CurseForge category id
+        if ($categoryId = $this->categoryIdForFilter($filters['category'] ?? null)) {
+            $baseParams['categoryId'] = $categoryId;
         }
 
-        $response = $this->client->get('/mods/search', $params);
+        $requestedLoaders = $this->requestedLoaders($filters);
 
-        if ($response->failed()) {
-            Log::error('[ModpackManager] CurseForge search failed', ['status' => $response->status(), 'body' => $response->body()]);
-            throw new RuntimeException('CurseForge API request failed: ' . $response->status());
+        if (count($requestedLoaders) <= 1) {
+            $params = $baseParams + [
+                'index' => $page * $pageSize,
+                'pageSize' => min(50, $pageSize),
+            ];
+            if (($loaderType = $this->loaderTypeId($requestedLoaders[0] ?? null)) !== null) {
+                $params['modLoaderType'] = $loaderType;
+            }
+
+            $response = $this->client->get('/mods/search', $params);
+            if ($response->failed()) {
+                Log::error('[ModpackManager] CurseForge search failed', ['status' => $response->status(), 'body' => $response->body()]);
+                throw new RuntimeException('CurseForge API request failed: ' . $response->status());
+            }
+
+            return array_map(fn (array $mod) => $this->normalizeMod($mod), $response->json('data', []));
         }
 
-        $data = $response->json('data', []);
+        $needed = ($page + 1) * $pageSize;
+        $mods = [];
 
-        return array_map(fn (array $mod) => $this->normalizeMod($mod), $data);
+        foreach ($requestedLoaders as $loader) {
+            for ($index = 0; $index < $needed; $index += 50) {
+                $chunkSize = min(50, $needed - $index);
+                $params = $baseParams + [
+                    'index' => $index,
+                    'pageSize' => $chunkSize,
+                    'modLoaderType' => $this->loaderTypeId($loader),
+                ];
+
+                $response = $this->client->get('/mods/search', $params);
+                if ($response->failed()) {
+                    Log::error('[ModpackManager] CurseForge search failed', ['status' => $response->status(), 'body' => $response->body()]);
+                    throw new RuntimeException('CurseForge API request failed: ' . $response->status());
+                }
+
+                $data = $response->json('data', []);
+                foreach ($data as $mod) {
+                    if (is_array($mod) && isset($mod['id'])) {
+                        $mods[(string) $mod['id']] = $mod;
+                    }
+                }
+
+                if (count($data) < $chunkSize) {
+                    break;
+                }
+            }
+        }
+
+        $mods = array_values($mods);
+        usort($mods, fn ($a, $b) => ($b['downloadCount'] ?? 0) <=> ($a['downloadCount'] ?? 0));
+        $mods = array_slice($mods, $page * $pageSize, $pageSize);
+
+        return array_map(fn (array $mod) => $this->normalizeMod($mod), $mods);
     }
 
     /**
@@ -103,35 +158,93 @@ class CurseForgeService
      */
     public function searchContent(string $query = '', int $classId = self::CLASS_MODS, int $page = 0, int $pageSize = 20, array $filters = []): array
     {
-        $params = [
+        $baseParams = [
             'gameId'       => self::GAME_ID,
             'classId'      => $classId,
             'searchFilter' => $query,
-            'sortField'    => 2,       // Popularity
+            'sortField'    => 2,
             'sortOrder'    => 'desc',
-            'index'        => $page * $pageSize,
-            'pageSize'     => $pageSize,
         ];
 
         if (!empty($filters['gameVersion'])) {
-            $params['gameVersion'] = $filters['gameVersion'];
-        }
-        // Loader only constrains mods; Bukkit plugins have no modLoaderType facet, and
-        // a plugin-platform slug (paper/spigot/…) simply isn't in LOADER_TYPES, so it's
-        // ignored here rather than mis-filtering.
-        if (!empty($filters['loader']) && ($loaderType = self::LOADER_TYPES[$filters['loader']] ?? null)) {
-            $params['modLoaderType'] = $loaderType;
+            $baseParams['gameVersion'] = $filters['gameVersion'];
         }
 
-        $response = $this->client->get('/mods/search', $params);
+        $requestedLoaders = $classId === self::CLASS_MODS ? $this->requestedLoaders($filters) : [];
+        $categoryIds = array_values(array_unique(array_filter(array_map(
+            'intval',
+            is_array($filters['categoryIds'] ?? null) ? $filters['categoryIds'] : []
+        ), fn ($id) => $id > 0)));
 
-        if ($response->failed()) {
-            Log::error('[ModpackManager] CurseForge content search failed', ['status' => $response->status(), 'body' => $response->body()]);
-            throw new RuntimeException('CurseForge API request failed: ' . $response->status());
+        $loaderVariants = !empty($requestedLoaders) ? $requestedLoaders : [null];
+        $categoryVariants = !empty($categoryIds) ? $categoryIds : [null];
+
+        if (count($loaderVariants) === 1 && count($categoryVariants) === 1) {
+            $params = $baseParams + [
+                'index' => $page * $pageSize,
+                'pageSize' => min(50, $pageSize),
+            ];
+            if (($loaderType = $this->loaderTypeId($loaderVariants[0])) !== null) {
+                $params['modLoaderType'] = $loaderType;
+            }
+            if ($categoryVariants[0] !== null) {
+                $params['categoryId'] = $categoryVariants[0];
+            }
+
+            $response = $this->client->get('/mods/search', $params);
+            if ($response->failed()) {
+                Log::error('[ModpackManager] CurseForge content search failed', ['status' => $response->status(), 'body' => $response->body()]);
+                throw new RuntimeException('CurseForge API request failed: ' . $response->status());
+            }
+
+            return array_map(fn (array $mod) => $this->normalizeMod($mod), $response->json('data', []));
         }
 
-        return array_map(fn (array $mod) => $this->normalizeMod($mod), $response->json('data', []));
+        $needed = ($page + 1) * $pageSize;
+        $mods = [];
+
+        foreach ($categoryVariants as $categoryId) {
+            foreach ($loaderVariants as $loader) {
+                for ($index = 0; $index < $needed; $index += 50) {
+                    $chunkSize = min(50, $needed - $index);
+                    $params = $baseParams + [
+                        'index' => $index,
+                        'pageSize' => $chunkSize,
+                    ];
+                    if (($loaderType = $this->loaderTypeId($loader)) !== null) {
+                        $params['modLoaderType'] = $loaderType;
+                    }
+                    if ($categoryId !== null) {
+                        $params['categoryId'] = $categoryId;
+                    }
+
+                    $response = $this->client->get('/mods/search', $params);
+                    if ($response->failed()) {
+                        Log::error('[ModpackManager] CurseForge content search failed', ['status' => $response->status(), 'body' => $response->body()]);
+                        throw new RuntimeException('CurseForge API request failed: ' . $response->status());
+                    }
+
+                    $data = $response->json('data', []);
+                    foreach ($data as $mod) {
+                        if (is_array($mod) && isset($mod['id'])) {
+                            $mods[(string) $mod['id']] = $mod;
+                        }
+                    }
+
+                    if (count($data) < $chunkSize) {
+                        break;
+                    }
+                }
+            }
+        }
+
+        $mods = array_values($mods);
+        usort($mods, fn ($a, $b) => ($b['downloadCount'] ?? 0) <=> ($a['downloadCount'] ?? 0));
+        $mods = array_slice($mods, $page * $pageSize, $pageSize);
+
+        return array_map(fn (array $mod) => $this->normalizeMod($mod), $mods);
     }
+
 
     /**
      * All Minecraft release versions known to CurseForge, newest first — used to
@@ -228,6 +341,64 @@ class CurseForgeService
     }
 
     /**
+     * Categories for individual Minecraft mods or Bukkit plugins.
+     *
+     * @return array<int, array{id:int, name:string}>
+     */
+    public function getContentCategories(int $classId = self::CLASS_MODS): array
+    {
+        if (!in_array($classId, [self::CLASS_MODS, self::CLASS_PLUGINS], true)) {
+            return [];
+        }
+
+        $cacheKey = "modpack-manager:curseforge:content-categories:{$classId}";
+
+        if ($cached = Cache::get($cacheKey)) {
+            return $cached;
+        }
+
+        try {
+            $response = $this->client->get('/categories', [
+                'gameId' => self::GAME_ID,
+                'classId' => $classId,
+            ]);
+
+            if ($response->failed()) {
+                Log::warning('[ModpackManager] CurseForge content categories failed', [
+                    'class_id' => $classId,
+                    'status' => $response->status(),
+                ]);
+                return [];
+            }
+
+            $categories = [];
+            foreach ($response->json('data', []) ?? [] as $category) {
+                if (isset($category['id'], $category['name'])) {
+                    $categories[] = [
+                        'id' => (int) $category['id'],
+                        'name' => (string) $category['name'],
+                    ];
+                }
+            }
+
+            usort($categories, fn ($a, $b) => strcasecmp($a['name'], $b['name']));
+
+            if (!empty($categories)) {
+                Cache::put($cacheKey, $categories, now()->addDay());
+            }
+
+            return $categories;
+        } catch (Throwable $e) {
+            Log::warning('[ModpackManager] CurseForge content categories error', [
+                'class_id' => $classId,
+                'error' => $e->getMessage(),
+            ]);
+            return [];
+        }
+    }
+
+
+    /**
      * Get a single mod/pack by ID.
      */
     public function getMod(int $modId): array
@@ -239,6 +410,20 @@ class CurseForgeService
         }
 
         return $this->normalizeMod($response->json('data'));
+    }
+
+
+    public function getDescription(int $modId): string
+    {
+        $response = $this->client->get("/mods/{$modId}/description", ['stripped' => true]);
+
+        if ($response->failed()) {
+            return '';
+        }
+
+        $description = (string) ($response->json('data') ?? '');
+
+        return trim(html_entity_decode(strip_tags($description), ENT_QUOTES | ENT_HTML5, 'UTF-8'));
     }
 
     /**
@@ -255,19 +440,27 @@ class CurseForgeService
      */
     public function getFiles(int $modId, array $filters = []): array
     {
-        $files = $this->fetchFiles($modId, $filters);
+        $requestedLoaders = $this->requestedLoaders($filters);
+        $loaderQueries = count($requestedLoaders) > 1 ? $requestedLoaders : [($requestedLoaders[0] ?? null)];
+        $filesById = [];
 
-        // Narrowing is stricter than what a server can actually load: CurseForge
-        // matches only files carrying the tags, so cross-loader builds that do
-        // run (Fabric on Quilt, Forge on NeoForge) and older untagged uploads
-        // drop out entirely. Fall back to the unfiltered list rather than show
-        // an empty picker — the drawer already warns when the chosen file isn't
-        // listed for this server.
-        if (empty($files) && $filters !== []) {
-            $files = $this->fetchFiles($modId);
+        foreach ($loaderQueries as $loader) {
+            $queryFilters = $filters;
+            unset($queryFilters['loaders']);
+            if ($loader) {
+                $queryFilters['loader'] = $loader;
+            } else {
+                unset($queryFilters['loader']);
+            }
+
+            foreach ($this->fetchFiles($modId, $queryFilters) as $file) {
+                if (isset($file['id'])) {
+                    $filesById[(string) $file['id']] = $file;
+                }
+            }
         }
 
-        // Newest first.
+        $files = array_values($filesById);
         usort($files, fn ($a, $b) => strcmp($b['fileDate'] ?? '', $a['fileDate'] ?? ''));
 
         return array_values(array_map(
@@ -479,6 +672,59 @@ class CurseForgeService
         return "https://edge.forgecdn.net/files/{$p1}/{$p2}/" . rawurlencode($fileName);
     }
 
+    private function requestedLoaders(array $filters): array
+    {
+        $values = $filters['loaders'] ?? (isset($filters['loader']) ? [$filters['loader']] : []);
+
+        return array_values(array_unique(array_filter(array_map(
+            fn ($loader) => strtolower(trim((string) $loader)),
+            is_array($values) ? $values : [$values]
+        ), fn ($loader) => isset(self::LOADER_TYPES[$loader]))));
+    }
+
+    private function categoryIdForFilter(mixed $value): ?int
+    {
+        if ($value === null || $value === '') {
+            return null;
+        }
+
+        if (is_numeric($value)) {
+            return (int) $value;
+        }
+
+        return self::CATEGORY_IDS[strtolower(trim((string) $value))] ?? null;
+    }
+
+    private function safeHttpUrl(mixed $url): ?string
+    {
+        return is_string($url) && preg_match('#^https?://#i', $url) ? $url : null;
+    }
+
+    private function normalizeGallery(array $screenshots): array
+    {
+        $images = [];
+
+        foreach ($screenshots as $shot) {
+            if (!is_array($shot)) {
+                continue;
+            }
+
+            $url = $this->safeHttpUrl($shot['url'] ?? null);
+            if (!$url) {
+                continue;
+            }
+
+            $images[] = [
+                'url' => $url,
+                'thumbnailUrl' => $this->safeHttpUrl($shot['thumbnailUrl'] ?? null) ?? $url,
+                'title' => $shot['title'] ?? null,
+                'description' => $shot['description'] ?? null,
+            ];
+        }
+
+        return $images;
+    }
+
     // ─── Normalise ────────────────────────────────────────────────────────────
 
     private function normalizeMod(array $mod): array
@@ -489,6 +735,7 @@ class CurseForgeService
             'slug'          => $mod['slug'] ?? '',
             'name'          => $mod['name'],
             'summary'       => $mod['summary'] ?? '',
+            'description'   => $mod['summary'] ?? '',
             'downloadCount' => $mod['downloadCount'] ?? 0,
             'iconUrl'       => $mod['logo']['thumbnailUrl'] ?? $mod['logo']['url'] ?? null,
             'author'        => $mod['authors'][0]['name'] ?? 'Unknown',
@@ -496,6 +743,9 @@ class CurseForgeService
             'gameVersions'  => $mod['latestFilesIndexes'][0]['gameVersion'] ?? null,
             'loaders'       => $this->extractLoaders($mod['latestFilesIndexes'] ?? []),
             'latestFileId'  => $mod['mainFileId'] ?? null,
+            'websiteUrl'    => $this->safeHttpUrl($mod['links']['websiteUrl'] ?? null)
+                ?? (!empty($mod['slug']) ? 'https://www.curseforge.com/minecraft/modpacks/' . rawurlencode((string) $mod['slug']) : null),
+            'gallery'       => $this->normalizeGallery($mod['screenshots'] ?? []),
         ];
     }
 

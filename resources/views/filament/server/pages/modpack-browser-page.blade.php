@@ -217,7 +217,23 @@
 
     .mpm-filterpanel { margin-top:14px; padding:18px; border-radius:16px; background:var(--mpm-surface-2); border:1px solid var(--mpm-border); }
     .mpm-filtergrid { display:grid; grid-template-columns:repeat(auto-fit, minmax(180px, 1fr)); gap:14px; }
+    .mpm-loader-picks { display:flex; flex-wrap:wrap; gap:7px; margin-top:2px; }
+    .mpm-filterchip { display:inline-flex; align-items:center; gap:6px; padding:7px 10px; border-radius:9px; cursor:pointer;
+        font-size:.75rem; font-weight:750; color:var(--mpm-text-2); background:var(--mpm-surface); border:1px solid var(--mpm-border); transition:all .14s; }
+    .mpm-filterchip:hover { color:var(--mpm-text); border-color:var(--mpm-border-2); }
+    .mpm-filterchip.is-active { color:#fff; border-color:var(--mpm-accent); background:var(--mpm-accent); box-shadow:0 4px 12px var(--mpm-accent-lo); }
+    .mpm-filterchip .dot { width:6px; height:6px; border-radius:50%; background:currentColor; }
+    .mpm-filter-note { margin:7px 0 0; font-size:.7rem; color:var(--mpm-muted); line-height:1.4; }
     .mpm-filteractions { display:flex; justify-content:flex-end; align-items:center; gap:10px; margin-top:16px; }
+    .mpm-active-filters { display:flex; flex-wrap:wrap; align-items:center; gap:7px; margin-top:12px; }
+    .mpm-active-filter { display:inline-flex; align-items:center; gap:7px; padding:6px 9px; border-radius:999px; cursor:pointer;
+        font-size:.72rem; font-weight:750; color:var(--mpm-text-2); background:var(--mpm-surface-2); border:1px solid var(--mpm-border); }
+    .mpm-active-filter:hover { color:var(--mpm-text); border-color:var(--mpm-accent); }
+    .mpm-active-filter__x { font-size:.9rem; line-height:1; color:var(--mpm-muted); }
+    .mpm-provider-warning { display:flex; align-items:flex-start; gap:10px; padding:11px 13px; border-radius:12px;
+        color:#fcd34d; background:color-mix(in srgb,var(--mpm-warn) 10%,var(--mpm-surface)); border:1px solid color-mix(in srgb,var(--mpm-warn) 35%,var(--mpm-border)); font-size:.76rem; }
+    .mpm-provider-warning svg { width:16px; height:16px; flex-shrink:0; margin-top:1px; }
+    .mpm-provider-warning button { margin-left:auto; flex-shrink:0; border:0; background:none; color:inherit; cursor:pointer; font-weight:800; text-decoration:underline; text-underline-offset:3px; }
 
     /* subtle secondary action (last log) */
     .mpm-loglink { display:inline-flex; align-items:center; gap:8px; margin-top:16px; padding:8px 14px; border-radius:11px; cursor:pointer;
@@ -269,6 +285,13 @@
     .mpm-chip::before { content:""; width:6px; height:6px; border-radius:50%; background:var(--c); }
     .mpm-chip--src { color:#fff; background:var(--c); border-color:var(--c); box-shadow:0 2px 8px color-mix(in srgb, var(--c) 45%, transparent); }
     .mpm-chip--src::before { background:rgba(255,255,255,.9); }
+
+    .mpm-row__quick { flex:1 1 100%; display:flex; gap:7px; margin-top:4px; }
+    .mpm-quickbtn { display:inline-flex; align-items:center; justify-content:center; gap:6px; min-height:31px; padding:6px 10px; border-radius:9px;
+        font-size:.7rem; font-weight:700; color:var(--mpm-text-2); background:var(--mpm-surface-2); border:1px solid var(--mpm-border); cursor:pointer; transition:all .14s; text-decoration:none; }
+    .mpm-quickbtn:hover { color:var(--mpm-text); border-color:var(--mpm-border-2); background:var(--mpm-surface-3); }
+    .mpm-quickbtn svg { width:13px; height:13px; }
+    .mpm-quickbtn--grow { flex:1; }
 
     /* row CTA — full-width bar pinned to the bottom of the card */
     .mpm-row__cta { flex:1 1 100%; display:flex; align-items:center; gap:12px; margin-top:2px; }
@@ -503,6 +526,59 @@
     .mpm-logmodal__close svg { width:18px; height:18px; }
     .mpm-logmodal__body { padding:20px 22px; display:flex; }
 
+    .mpm-more { display:flex; justify-content:center; padding:4px 0 2px; }
+    .mpm-more__btn { min-width:190px; }
+
+    .mpm-info-scrim { position:fixed; inset:0; z-index:10040; background:rgba(5,5,7,.82); backdrop-filter:blur(7px); }
+    .mpm-info { position:fixed; z-index:10050; left:50%; top:50%; transform:translate(-50%,-50%); width:min(860px,calc(100vw - 28px));
+        max-height:min(82vh,760px); display:flex; flex-direction:column; overflow:hidden; border-radius:20px; border:1px solid var(--mpm-border-2);
+        background:var(--mpm-surface); box-shadow:0 28px 80px rgba(0,0,0,.6); }
+    .mpm-info__head { display:flex; align-items:center; gap:13px; padding:16px 18px; border-bottom:1px solid var(--mpm-border); }
+    .mpm-info__art { width:44px; height:44px; object-fit:cover; border-radius:11px; border:1px solid var(--mpm-border-2); }
+    .mpm-info__title { min-width:0; flex:1; }
+    .mpm-info__eyebrow { margin:0 0 2px; font-size:.64rem; text-transform:uppercase; letter-spacing:.12em; font-weight:800; color:var(--mpm-accent); }
+    .mpm-info__name { margin:0; font-size:1.05rem; font-weight:800; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .mpm-info__body { padding:20px; overflow:auto; }
+    .mpm-info__error { margin-bottom:14px; padding:10px 12px; border-radius:10px; color:#fecaca; background:color-mix(in srgb,var(--mpm-danger) 14%,transparent); border:1px solid color-mix(in srgb,var(--mpm-danger) 38%,transparent); font-size:.78rem; }
+    .mpm-description { margin:0; color:var(--mpm-text-2); line-height:1.65; font-size:.88rem; white-space:pre-wrap; overflow-wrap:anywhere; }
+    .mpm-gallery { display:grid; grid-template-columns:repeat(auto-fill,minmax(210px,1fr)); gap:12px; }
+    .mpm-gallery__item { display:block; width:100%; padding:0; overflow:hidden; border-radius:13px; border:1px solid var(--mpm-border); background:var(--mpm-surface-2); text-decoration:none; cursor:pointer; text-align:left; }
+    .mpm-gallery__item img { width:100%; aspect-ratio:16/9; object-fit:cover; display:block; background:var(--mpm-surface-3); }
+    .mpm-gallery__cap { padding:9px 10px; font-size:.72rem; color:var(--mpm-text-2); }
+    .mpm-gallery__empty { padding:42px 20px; text-align:center; color:var(--mpm-muted); border:1px dashed var(--mpm-border-2); border-radius:14px; }
+    .mpm-info__foot { display:flex; justify-content:flex-end; gap:9px; padding:14px 18px; border-top:1px solid var(--mpm-border); }
+
+    .mpm-gallery-dialog { width:min(94vw,1320px); height:min(88vh,920px); max-width:none; max-height:none; padding:0; overflow:hidden;
+        border-radius:18px; border:1px solid rgba(255,255,255,.16); background:#111114; color:#fff; box-shadow:0 28px 100px rgba(0,0,0,.72); }
+    .mpm-gallery-dialog::backdrop { background:rgba(0,0,0,.86); backdrop-filter:blur(8px); }
+    .mpm-gallery-dialog__panel { position:relative; width:100%; height:100%; display:flex; flex-direction:column; }
+    .mpm-gallery-dialog__stage { flex:1; min-height:0; display:flex; align-items:center; justify-content:center; padding:20px; background:#08080a; }
+    .mpm-gallery-dialog__img { width:100%; height:100%; object-fit:contain; display:block; }
+    .mpm-gallery-dialog__cap { flex-shrink:0; padding:12px 62px 13px 16px; color:#e4e4e7; font-size:.8rem; text-align:center; border-top:1px solid rgba(255,255,255,.08); background:#111114; }
+    .mpm-gallery-dialog__close { position:absolute; z-index:2; top:12px; right:12px; width:42px; height:42px; display:flex; align-items:center; justify-content:center;
+        border-radius:999px; border:2px solid rgba(255,255,255,.92); background:#dc2626; color:#fff; cursor:pointer; font-size:1.55rem; font-weight:800; line-height:1; box-shadow:0 6px 20px rgba(0,0,0,.45); }
+    .mpm-gallery-dialog__close:hover { background:#ef4444; transform:scale(1.04); }
+    @media (max-width:560px){
+        .mpm-gallery-dialog { width:96vw; height:84vh; border-radius:14px; }
+        .mpm-gallery-dialog__stage { padding:10px; }
+    }
+
+    .mpm-confirm-scrim { position:fixed; inset:0; z-index:10060; background:rgba(5,5,7,.86); backdrop-filter:blur(8px); }
+    .mpm-confirm { position:fixed; z-index:10070; left:50%; top:50%; transform:translate(-50%,-50%); width:min(560px,calc(100vw - 28px));
+        overflow:hidden; border-radius:20px; background:var(--mpm-surface); border:1px solid var(--mpm-border-2); box-shadow:var(--mpm-shadow-lg); }
+    .mpm-confirm__head { padding:18px 20px; border-bottom:1px solid var(--mpm-border); }
+    .mpm-confirm__eyebrow { margin:0 0 4px; color:var(--mpm-accent); font-size:.65rem; font-weight:850; text-transform:uppercase; letter-spacing:.12em; }
+    .mpm-confirm__title { margin:0; font-size:1.08rem; font-weight:850; }
+    .mpm-confirm__body { padding:18px 20px; display:flex; flex-direction:column; gap:12px; }
+    .mpm-confirm__pack { display:flex; gap:12px; align-items:center; }
+    .mpm-confirm__pack img { width:48px; height:48px; border-radius:12px; object-fit:cover; border:1px solid var(--mpm-border-2); }
+    .mpm-confirm__grid { display:grid; grid-template-columns:1fr 1fr; gap:9px; }
+    .mpm-confirm__item { padding:10px 11px; border-radius:11px; background:var(--mpm-surface-2); border:1px solid var(--mpm-border); }
+    .mpm-confirm__k { display:block; font-size:.64rem; color:var(--mpm-muted); text-transform:uppercase; letter-spacing:.08em; font-weight:800; }
+    .mpm-confirm__v { display:block; margin-top:2px; font-size:.8rem; color:var(--mpm-text); font-weight:750; }
+    .mpm-confirm__warn { padding:10px 11px; border-radius:11px; color:#fcd34d; background:color-mix(in srgb,var(--mpm-warn) 10%,var(--mpm-surface)); border:1px solid color-mix(in srgb,var(--mpm-warn) 35%,var(--mpm-border)); font-size:.75rem; line-height:1.45; }
+    .mpm-confirm__foot { display:flex; gap:10px; justify-content:flex-end; padding:14px 20px; border-top:1px solid var(--mpm-border); }
+
     @media (max-width:860px){
         .mpm-row { flex-wrap:wrap; }
         .mpm-row__cta { width:100%; justify-content:space-between; margin-top:4px; }
@@ -528,6 +604,8 @@
         showDebug: false,
         filtersOpen: false,
         drawerOpen: @entangle('showModal'),
+        infoOpen: @entangle('showInfoModal'),
+        confirmOpen: @entangle('showInstallConfirmation'),
         lastLogOpen: @entangle('showLastLog'),
         starting: false,
         linking: false,
@@ -749,6 +827,19 @@
                 </button>
             </div>
 
+            @php $activeFilterChips = $this->getActiveFilterChips(); @endphp
+            @if(!empty($activeFilterChips))
+                <div class="mpm-active-filters">
+                    @foreach($activeFilterChips as $chip)
+                        <button type="button" class="mpm-active-filter"
+                                wire:click="removeFilterChip('{{ $chip['type'] }}', '{{ $chip['value'] }}')"
+                                title="Remove filter">
+                            <span>{{ $chip['label'] }}</span><span class="mpm-active-filter__x">×</span>
+                        </button>
+                    @endforeach
+                </div>
+            @endif
+
             {{-- Filter panel: Minecraft version · loader · category --}}
             <div class="mpm-filterpanel" x-show="filtersOpen" x-cloak x-transition>
                 <div class="mpm-filtergrid">
@@ -765,16 +856,20 @@
                         </div>
                     </div>
                     <div>
-                        <label class="mpm-label">Loader</label>
-                        <div class="mpm-select-wrap">
-                            <select class="mpm-select" wire:model="filterLoader">
-                                <option value="">Any loader</option>
+                        <label class="mpm-label">Loaders <span style="font-weight:500;color:var(--mpm-muted);">(pick more than one)</span></label>
+                        @if($this->loaderFilterAvailable())
+                            <div class="mpm-loader-picks">
                                 @foreach($this->getFilterLoaderOptions() as $slug => $label)
-                                    <option value="{{ $slug }}">{{ $label }}</option>
+                                    <button type="button"
+                                            wire:click="toggleLoader('{{ $slug }}')"
+                                            class="mpm-filterchip {{ in_array($slug, $filterLoaders, true) ? 'is-active' : '' }}">
+                                        <span class="dot"></span>{{ $label }}
+                                    </button>
                                 @endforeach
-                            </select>
-                            <svg class="caret" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
-                        </div>
+                            </div>
+                        @else
+                            <p class="mpm-filter-note">ATLauncher does not expose loader data in its public pack list, so loader filtering is unavailable for this source.</p>
+                        @endif
                     </div>
                     @if($this->categoryFilterAvailable())
                     <div>
@@ -790,7 +885,21 @@
                         </div>
                     </div>
                     @endif
+                    <div>
+                        <label class="mpm-label">Sort</label>
+                        <div class="mpm-select-wrap">
+                            <select class="mpm-select" wire:model="filterSort">
+                                @foreach($this->getSortOptions() as $value => $label)
+                                    <option value="{{ $value }}">{{ $label }}</option>
+                                @endforeach
+                            </select>
+                            <svg class="caret" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+                        </div>
+                    </div>
                 </div>
+                @if($provider === 'all')
+                    <p class="mpm-filter-note" style="margin-top:12px;">All sources includes CurseForge, Modrinth, FTB and ATLauncher. If a selected filter is not exposed by a provider, that provider is left out instead of showing incorrect matches.</p>
+                @endif
                 <div class="mpm-filteractions">
                     @if($activeFilters)
                         <button type="button" class="mpm-btn mpm-btn--ghost" wire:click="clearFilters">Clear filters</button>
@@ -811,6 +920,17 @@
                 </div>
             @endif
         </div>
+
+        @if(!empty($providerErrors) && $provider === 'all')
+            <div class="mpm-provider-warning mpm-rise">
+                <svg fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
+                <div>
+                    <b>Some sources could not be reached.</b> Results from the other providers are still shown.
+                    <div style="margin-top:3px;opacity:.9;">{{ implode(' ', array_values($providerErrors)) }}</div>
+                </div>
+                <button type="button" wire:click="retryProviderSearches">Retry</button>
+            </div>
+        @endif
 
         @if($errorMsg)
             <div class="mpm-alert mpm-rise">
@@ -851,6 +971,8 @@
                         $pv = $pack['provider'] ?? '';
                         $pvLabel = ['curseforge'=>'CurseForge','modrinth'=>'Modrinth','ftb'=>'FTB','atlauncher'=>'ATLauncher'][$pv] ?? ucfirst($pv);
                         $pvColor = ['curseforge'=>'var(--mpm-cf)','modrinth'=>'var(--mpm-mr)','ftb'=>'var(--mpm-ftb)','atlauncher'=>'var(--mpm-atl)'][$pv] ?? '#8b8aa3';
+                        $siteUrl = $this->externalUrl($pack['websiteUrl'] ?? null);
+                        $galleryCount = count($pack['gallery'] ?? []);
                     @endphp
                     <div class="mpm-row mpm-rise {{ $isInstalled ? 'is-installed' : '' }}" style="--row-c:{{ $pvColor }}; animation-delay: {{ min($i * 40, 320) }}ms"
                          role="button" tabindex="0"
@@ -895,6 +1017,25 @@
                             </div>
                         </div>
 
+                        <div class="mpm-row__quick">
+                            <button type="button" class="mpm-quickbtn mpm-quickbtn--grow"
+                                    wire:click.stop="openPackInfo('{{ $pack['id'] }}', '{{ $pack['provider'] ?? '' }}', 'description')">
+                                <svg fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 10h8M8 14h5m-7 7l-4-4V5a2 2 0 012-2h16a2 2 0 012 2v12a2 2 0 01-2 2H8l-2 2z"/></svg>
+                                Description
+                            </button>
+                            <button type="button" class="mpm-quickbtn mpm-quickbtn--grow"
+                                    wire:click.stop="openPackInfo('{{ $pack['id'] }}', '{{ $pack['provider'] ?? '' }}', 'gallery')">
+                                <svg fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
+                                Gallery{{ $galleryCount ? ' · '.$galleryCount : '' }}
+                            </button>
+                            @if($siteUrl)
+                                <a href="{{ $siteUrl }}" target="_blank" rel="noopener noreferrer" class="mpm-quickbtn" @click.stop title="Open modpack page">
+                                    <svg fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14 3h7m0 0v7m0-7L10 14M5 5h5M5 5a2 2 0 00-2 2v12a2 2 0 002 2h12a2 2 0 002-2v-5"/></svg>
+                                    Open
+                                </a>
+                            @endif
+                        </div>
+
                         <div class="mpm-row__cta">
                             @if($isInstalled && $updateAvailable)
                                 <span class="mpm-cta-state mpm-cta--update">
@@ -920,6 +1061,15 @@
                 @endforeach
             </div>
 
+            @if($hasMore)
+                <div class="mpm-more">
+                    <button type="button" class="mpm-btn mpm-btn--ghost mpm-more__btn" wire:click="loadMore" wire:loading.attr="disabled" wire:target="loadMore">
+                        <span wire:loading.remove wire:target="loadMore">Load 20 more</span>
+                        <span wire:loading wire:target="loadMore">Loading more…</span>
+                    </button>
+                </div>
+            @endif
+
         @else
             <div class="mpm-empty mpm-rise">
                 <div class="mpm-empty__orb">
@@ -944,7 +1094,7 @@
     <div class="mpm">
 
     <div class="mpm-scrim" x-show="drawerOpen" x-cloak x-transition.opacity
-         @keydown.escape.window="$wire.closeModal()" @click="$wire.closeModal()"></div>
+         @keydown.escape.window="if (!confirmOpen) $wire.closeModal()" @click="if (!confirmOpen) $wire.closeModal()"></div>
 
     <div class="mpm-drawer" :class="{ 'is-open': drawerOpen }" x-cloak>
 
@@ -1010,8 +1160,22 @@
                                         $label = $ver['displayName'] ?? $ver['versionNumber'] ?? $ver['name'] ?? $ver['fileName'] ?? $ver['id'];
                                         $date = isset($ver['datePublished']) ? \Carbon\Carbon::parse($ver['datePublished'])->format('M j, Y')
                                               : (isset($ver['fileDate']) ? \Carbon\Carbon::parse($ver['fileDate'])->format('M j, Y') : '');
+                                        $loaderTags = array_values(array_filter(array_map(
+                                            fn ($loader) => strtolower((string) $loader),
+                                            $ver['loaders'] ?? []
+                                        ), fn ($loader) => in_array($loader, ['forge', 'neoforge', 'fabric', 'quilt'], true)));
+                                        if (empty($loaderTags)) {
+                                            $loaderTags = array_values(array_filter(array_map(
+                                                fn ($loader) => strtolower((string) $loader),
+                                                $ver['gameVersions'] ?? []
+                                            ), fn ($loader) => in_array($loader, ['forge', 'neoforge', 'fabric', 'quilt'], true)));
+                                        }
+                                        $loaderText = implode('/', array_map(
+                                            fn ($loader) => $loader === 'neoforge' ? 'NeoForge' : ucfirst($loader),
+                                            array_unique($loaderTags)
+                                        ));
                                     @endphp
-                                    <option value="{{ $ver['id'] }}">{{ $label }}{{ $date ? ' • '.$date : '' }}</option>
+                                    <option value="{{ $ver['id'] }}">{{ $label }}{{ $loaderText ? ' • '.$loaderText : '' }}{{ $date ? ' • '.$date : '' }}</option>
                                 @endforeach
                             </select>
                             <svg class="caret" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
@@ -1029,7 +1193,7 @@
                             <span class="mpm-tag">{{ $file }}</span>
                         @endforeach
                     </div>
-                    <p class="mpm-preserve__note">Never deleted and always restored after install.</p>
+                    <p class="mpm-preserve__note">Player/admin files are restored after the new pack is assembled. server.properties is merged safely so the new pack keeps its own world-generation settings.</p>
                 </div>
 
                 <label class="mpm-opt">
@@ -1046,9 +1210,16 @@
                     <span class="mpm-opt__track"></span>
                     <span>
                         <span class="mpm-opt__title">Wipe existing server files</span>
-                        <span class="mpm-opt__desc">Removes old mods/config before install (preserved files above are kept).</span>
+                        <span class="mpm-opt__desc">Removes old mods, configs and loader runtime before install. Defaults ON when changing modpacks and is strongly recommended, but you can turn it off. Worlds are handled separately below.</span>
                     </span>
                 </label>
+
+                @if($installedModpack && !$isInstalledPack)
+                    <div class="mpm-danger-panel" x-show="!$wire.deleteExisting" x-cloak>
+                        <div class="mpm-danger-panel__title">Keeping old server files</div>
+                        <p class="mpm-danger-panel__text">You are switching to a different modpack. Leaving this off can mix old mods, configs, datapacks and loader files into the new pack, causing crashes or incorrect world generation. Keeping Wipe existing server files ON is strongly recommended.</p>
+                    </div>
+                @endif
 
                 <label class="mpm-opt mpm-opt--danger">
                     <input type="checkbox" x-model="$wire.deleteWorld">
@@ -1121,16 +1292,13 @@
             <div class="mpm-drawer__foot">
                 <div class="mpm-drawer__actions">
                     <button type="button"
-                            @click="starting = true; $wire.startInstall().finally(() => starting = false)"
+                            @click="$wire.reviewInstall()"
                             class="mpm-btn {{ $isUpd ? 'mpm-btn--update' : 'mpm-btn--primary' }}"
                             :disabled="starting || linking"
                             @if($versionsLoading || empty($versions)) disabled @endif>
-                        <span class="mpm-ilbl" x-show="!starting">
-                            <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" style="width:16px;height:16px;"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
-                            {{ $isUpd ? 'Update' : ($isInstalledPack ? 'Reinstall' : 'Install') }}
-                        </span>
-                        <span class="mpm-ilbl" x-show="starting" x-cloak>
-                            <svg class="mpm-spin" style="width:16px;height:16px;" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>Starting…
+                        <span class="mpm-ilbl">
+                            <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" style="width:16px;height:16px;"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                            Review {{ $isUpd ? 'update' : ($isInstalledPack ? 'reinstall' : 'install') }}
                         </span>
                     </button>
                     <button type="button" class="mpm-btn mpm-btn--ghost" @click="$wire.closeModal()">Cancel</button>
@@ -1157,6 +1325,136 @@
             </div>
         @endif
     </div>
+
+    {{-- ══════════════ MODPACK DESCRIPTION / GALLERY ══════════════ --}}
+    <div class="mpm-info-scrim" x-show="infoOpen" x-cloak x-transition.opacity
+         @click.self="$wire.closePackInfo()"></div>
+
+    <div class="mpm-info" x-show="infoOpen" x-cloak x-transition>
+        @if($infoModpack)
+            @php
+                $infoSiteUrl = $this->externalUrl($infoModpack['websiteUrl'] ?? null);
+                $infoDescription = trim((string) ($infoModpack['description'] ?? $infoModpack['summary'] ?? ''));
+                $infoGallery = array_values(array_filter(
+                    $infoModpack['gallery'] ?? [],
+                    fn ($image) => is_array($image) && $this->externalUrl($image['url'] ?? null)
+                ));
+            @endphp
+            <div class="mpm-info__head">
+                @if(!empty($infoModpack['iconUrl']))
+                    <img src="{{ $infoModpack['iconUrl'] }}" alt="" class="mpm-info__art">
+                @endif
+                <div class="mpm-info__title">
+                    <p class="mpm-info__eyebrow">{{ $infoMode === 'gallery' ? 'Gallery' : 'Description' }}</p>
+                    <h3 class="mpm-info__name">{{ $infoModpack['name'] ?? 'Modpack' }}</h3>
+                </div>
+                <button type="button" class="mpm-logmodal__close" @click="$wire.closePackInfo()" aria-label="Close">
+                    <svg fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+                </button>
+            </div>
+
+            <div class="mpm-info__body">
+                @if($infoError !== '')
+                    <div class="mpm-info__error">{{ $infoError }}</div>
+                @endif
+
+                @if($infoMode === 'gallery')
+                    @if(!empty($infoGallery))
+                        <div class="mpm-gallery">
+                            @foreach($infoGallery as $image)
+                                @php
+                                    $imageUrl = $this->externalUrl($image['url'] ?? null);
+                                    $thumbUrl = $this->externalUrl($image['thumbnailUrl'] ?? null) ?? $imageUrl;
+                                    $caption = trim((string) ($image['title'] ?? $image['description'] ?? ''));
+                                @endphp
+                                @if($imageUrl)
+                                    <button type="button" class="mpm-gallery__item"
+                                            data-url="{{ $imageUrl }}" data-caption="{{ $caption }}"
+                                            onclick="const d=document.getElementById('mpm-modpack-gallery-preview'),i=document.getElementById('mpm-modpack-gallery-preview-image'),c=document.getElementById('mpm-modpack-gallery-preview-caption'); if(!d||!i)return; i.src=this.dataset.url; if(c){c.textContent=this.dataset.caption||''; c.hidden=!this.dataset.caption;} if(!d.open)d.showModal();">
+                                        <img src="{{ $thumbUrl }}" alt="{{ $caption }}" loading="lazy">
+                                        @if($caption !== '')
+                                            <div class="mpm-gallery__cap">{{ $caption }}</div>
+                                        @endif
+                                    </button>
+                                @endif
+                            @endforeach
+                        </div>
+                    @else
+                        <div class="mpm-gallery__empty">No gallery images are available for this modpack.</div>
+                    @endif
+                @else
+                    @if($infoDescription !== '')
+                        <p class="mpm-description">{{ $infoDescription }}</p>
+                    @else
+                        <div class="mpm-gallery__empty">No full description is available for this modpack.</div>
+                    @endif
+                @endif
+            </div>
+
+            <div class="mpm-info__foot">
+                @if($infoSiteUrl)
+                    <a href="{{ $infoSiteUrl }}" target="_blank" rel="noopener noreferrer" class="mpm-btn mpm-btn--ghost">
+                        Open modpack page
+                    </a>
+                @endif
+                <button type="button" class="mpm-btn mpm-btn--primary" @click="$wire.closePackInfo()">Close</button>
+            </div>
+        @endif
+    </div>
+
+    {{-- ══════════════ INSTALL CONFIRMATION ══════════════ --}}
+    <div class="mpm-confirm-scrim" x-show="confirmOpen" x-cloak x-transition.opacity
+         @click.self="$wire.cancelInstallConfirmation()"></div>
+    <div class="mpm-confirm" x-show="confirmOpen" x-cloak x-transition
+         @keydown.escape.window="$wire.cancelInstallConfirmation()">
+        @if($selectedModpack)
+            @php $review = $this->getInstallReview(); @endphp
+            <div class="mpm-confirm__head">
+                <p class="mpm-confirm__eyebrow">Confirm deployment</p>
+                <h3 class="mpm-confirm__title">Review exactly what will happen</h3>
+            </div>
+            <div class="mpm-confirm__body">
+                <div class="mpm-confirm__pack">
+                    @if(!empty($selectedModpack['iconUrl']))
+                        <img src="{{ $selectedModpack['iconUrl'] }}" alt="">
+                    @endif
+                    <div>
+                        <div style="font-weight:850;">{{ $review['name'] ?? $selectedModpack['name'] }}</div>
+                        <div style="font-size:.75rem;color:var(--mpm-muted);margin-top:2px;">{{ $review['provider'] ?? '' }} · {{ $review['version'] ?? '' }}@if(!empty($review['loaders'])) · {{ implode(' / ', $review['loaders']) }}@endif</div>
+                    </div>
+                </div>
+                <div class="mpm-confirm__grid">
+                    <div class="mpm-confirm__item"><span class="mpm-confirm__k">Create backup</span><span class="mpm-confirm__v">{{ !empty($review['backup']) ? 'Yes' : 'No' }}</span></div>
+                    <div class="mpm-confirm__item"><span class="mpm-confirm__k">Wipe old server files</span><span class="mpm-confirm__v">{{ !empty($review['wipeFiles']) ? 'Yes' : 'No' }}</span></div>
+                    <div class="mpm-confirm__item"><span class="mpm-confirm__k">Delete world</span><span class="mpm-confirm__v">{{ !empty($review['deleteWorld']) ? 'Yes' : 'No' }}</span></div>
+                    <div class="mpm-confirm__item"><span class="mpm-confirm__k">Delete selected backups</span><span class="mpm-confirm__v">{{ !empty($review['deleteBackups']) ? (($review['backupCount'] ?? 0) . ' selected') : 'No' }}</span></div>
+                </div>
+                @if(!empty($review['wipeFiles']) || !empty($review['deleteWorld']) || !empty($review['deleteBackups']))
+                    <div class="mpm-confirm__warn">This install includes destructive cleanup options. Check the summary above before continuing.</div>
+                @endif
+            </div>
+            <div class="mpm-confirm__foot">
+                <button type="button" class="mpm-btn mpm-btn--ghost" @click="$wire.cancelInstallConfirmation()">Back</button>
+                <button type="button" class="mpm-btn mpm-btn--primary"
+                        :disabled="starting"
+                        @click="starting = true; $wire.startInstall().finally(() => starting = false)">
+                    <span x-show="!starting">Confirm &amp; install</span>
+                    <span x-show="starting" x-cloak>Starting…</span>
+                </button>
+            </div>
+        @endif
+    </div>
+
+    {{-- ══════════════ GALLERY IMAGE PREVIEW ══════════════ --}}
+    <dialog id="mpm-modpack-gallery-preview" class="mpm-gallery-dialog" onclick="if (event.target === this) this.close()">
+        <div class="mpm-gallery-dialog__panel">
+            <button type="button" class="mpm-gallery-dialog__close" onclick="this.closest('dialog').close()" aria-label="Close image">×</button>
+            <div class="mpm-gallery-dialog__stage">
+                <img id="mpm-modpack-gallery-preview-image" class="mpm-gallery-dialog__img" src="" alt="">
+            </div>
+            <div id="mpm-modpack-gallery-preview-caption" class="mpm-gallery-dialog__cap" hidden></div>
+        </div>
+    </dialog>
 
     {{-- ══════════════ LAST INSTALL LOG MODAL ══════════════ --}}
     <div class="mpm-logscrim" x-show="lastLogOpen" x-cloak x-transition.opacity

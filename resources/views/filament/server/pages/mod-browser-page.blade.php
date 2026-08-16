@@ -311,11 +311,71 @@
         .mpm-hero__title { font-size:1.25rem; }
         .mpm-drawer { max-width:100%; }
     }
+
+    .mpm-loader-picks { display:flex; flex-wrap:wrap; gap:7px; margin-top:2px; }
+    .mpm-filterchip { display:inline-flex; align-items:center; gap:6px; padding:7px 10px; border-radius:9px; cursor:pointer;
+        font-size:.75rem; font-weight:750; color:var(--mpm-text-2); background:var(--mpm-surface); border:1px solid var(--mpm-border); transition:all .14s; }
+    .mpm-filterchip:hover { color:var(--mpm-text); border-color:var(--mpm-border-2); }
+    .mpm-filterchip.is-active { color:#fff; border-color:var(--mpm-accent); background:var(--mpm-accent); box-shadow:0 4px 12px var(--mpm-accent-lo); }
+    .mpm-filterchip .dot { width:6px; height:6px; border-radius:50%; background:currentColor; }
+    .mpm-filter-note { margin:7px 0 0; font-size:.7rem; color:var(--mpm-muted); line-height:1.4; }
+    .mpm-active-filters { display:flex; flex-wrap:wrap; align-items:center; gap:7px; margin-top:12px; }
+    .mpm-active-filter { display:inline-flex; align-items:center; gap:7px; padding:6px 9px; border-radius:999px; cursor:pointer;
+        font-size:.72rem; font-weight:750; color:var(--mpm-text-2); background:var(--mpm-surface-2); border:1px solid var(--mpm-border); }
+    .mpm-active-filter:hover { color:var(--mpm-text); border-color:var(--mpm-accent); }
+    .mpm-active-filter__x { font-size:.9rem; line-height:1; color:var(--mpm-muted); }
+    .mpm-provider-warning { display:flex; align-items:flex-start; gap:10px; padding:11px 13px; border-radius:12px;
+        color:#fcd34d; background:color-mix(in srgb,var(--mpm-warn) 10%,var(--mpm-surface)); border:1px solid color-mix(in srgb,var(--mpm-warn) 35%,var(--mpm-border)); font-size:.76rem; }
+    .mpm-provider-warning svg { width:16px; height:16px; flex-shrink:0; margin-top:1px; }
+    .mpm-provider-warning button { margin-left:auto; flex-shrink:0; border:0; background:none; color:inherit; cursor:pointer; font-weight:800; text-decoration:underline; text-underline-offset:3px; }
+    .mpm-row__quick { flex:1 1 100%; display:flex; gap:7px; margin-top:4px; }
+    .mpm-quickbtn { display:inline-flex; align-items:center; justify-content:center; gap:6px; min-height:31px; padding:6px 10px; border-radius:9px;
+        cursor:pointer; font-size:.7rem; font-weight:750; color:var(--mpm-text-2); background:var(--mpm-surface-2); border:1px solid var(--mpm-border); text-decoration:none; transition:all .14s; }
+    .mpm-quickbtn:hover { color:var(--mpm-text); border-color:var(--mpm-border-2); background:var(--mpm-surface-3); }
+    .mpm-quickbtn svg { width:13px; height:13px; }
+    .mpm-quickbtn--grow { flex:1; }
+    .mpm-more { display:flex; justify-content:center; padding:4px 0 2px; }
+    .mpm-more__btn { min-width:190px; }
+
+    .mpm-info-scrim { position:fixed; inset:0; z-index:10040; background:rgba(5,5,7,.82); backdrop-filter:blur(7px); }
+    .mpm-info { position:fixed; z-index:10050; left:50%; top:50%; transform:translate(-50%,-50%); width:min(860px,calc(100vw - 28px));
+        max-height:min(82vh,760px); display:flex; flex-direction:column; overflow:hidden; border-radius:20px; border:1px solid var(--mpm-border-2);
+        background:var(--mpm-surface); box-shadow:0 28px 80px rgba(0,0,0,.6); }
+    .mpm-info__head { display:flex; align-items:center; gap:13px; padding:16px 18px; border-bottom:1px solid var(--mpm-border); }
+    .mpm-info__art { width:44px; height:44px; object-fit:cover; border-radius:11px; border:1px solid var(--mpm-border-2); }
+    .mpm-info__title { min-width:0; flex:1; }
+    .mpm-info__eyebrow { margin:0 0 2px; font-size:.64rem; text-transform:uppercase; letter-spacing:.12em; font-weight:800; color:var(--mpm-accent); }
+    .mpm-info__name { margin:0; font-size:1.05rem; font-weight:800; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .mpm-info__body { padding:20px; overflow:auto; }
+    .mpm-info__error { margin-bottom:14px; padding:10px 12px; border-radius:10px; color:#fecaca; background:color-mix(in srgb,var(--mpm-danger) 14%,transparent); border:1px solid color-mix(in srgb,var(--mpm-danger) 38%,transparent); font-size:.78rem; }
+    .mpm-description { margin:0; color:var(--mpm-text-2); line-height:1.65; font-size:.88rem; white-space:pre-wrap; overflow-wrap:anywhere; }
+    .mpm-gallery { display:grid; grid-template-columns:repeat(auto-fill,minmax(210px,1fr)); gap:12px; }
+    .mpm-gallery__item { display:block; width:100%; padding:0; overflow:hidden; border-radius:13px; border:1px solid var(--mpm-border); background:var(--mpm-surface-2); text-decoration:none; cursor:pointer; text-align:left; }
+    .mpm-gallery__item img { width:100%; aspect-ratio:16/9; object-fit:cover; display:block; background:var(--mpm-surface-3); }
+    .mpm-gallery__cap { padding:9px 10px; font-size:.72rem; color:var(--mpm-text-2); }
+    .mpm-gallery__empty { padding:42px 20px; text-align:center; color:var(--mpm-muted); border:1px dashed var(--mpm-border-2); border-radius:14px; }
+    .mpm-info__foot { display:flex; justify-content:flex-end; gap:9px; padding:14px 18px; border-top:1px solid var(--mpm-border); }
+
+    .mpm-gallery-dialog { width:min(94vw,1320px); height:min(88vh,920px); max-width:none; max-height:none; padding:0; overflow:hidden;
+        border-radius:18px; border:1px solid rgba(255,255,255,.16); background:#111114; color:#fff; box-shadow:0 28px 100px rgba(0,0,0,.72); }
+    .mpm-gallery-dialog::backdrop { background:rgba(0,0,0,.86); backdrop-filter:blur(8px); }
+    .mpm-gallery-dialog__panel { position:relative; width:100%; height:100%; display:flex; flex-direction:column; }
+    .mpm-gallery-dialog__stage { flex:1; min-height:0; display:flex; align-items:center; justify-content:center; padding:20px; background:#08080a; }
+    .mpm-gallery-dialog__img { width:100%; height:100%; object-fit:contain; display:block; }
+    .mpm-gallery-dialog__cap { flex-shrink:0; padding:12px 62px 13px 16px; color:#e4e4e7; font-size:.8rem; text-align:center; border-top:1px solid rgba(255,255,255,.08); background:#111114; }
+    .mpm-gallery-dialog__close { position:absolute; z-index:2; top:12px; right:12px; width:42px; height:42px; display:flex; align-items:center; justify-content:center;
+        border-radius:999px; border:2px solid rgba(255,255,255,.92); background:#dc2626; color:#fff; cursor:pointer; font-size:1.55rem; font-weight:800; line-height:1; box-shadow:0 6px 20px rgba(0,0,0,.45); }
+    .mpm-gallery-dialog__close:hover { background:#ef4444; transform:scale(1.04); }
+    @media (max-width:560px){
+        .mpm-gallery-dialog { width:96vw; height:84vh; border-radius:14px; }
+        .mpm-gallery-dialog__stage { padding:10px; }
+    }
+
 </style>
 
 <div
     class="mpm"
-    x-data="{ filtersOpen: false, drawerOpen: @entangle('showModal'), installing: false }"
+    x-data="{ filtersOpen: false, drawerOpen: @entangle('showModal'), infoOpen: @entangle('showInfoModal'), installing: false }"
     x-init="
         document.documentElement.style.setProperty('background', '#050506', 'important');
         document.documentElement.style.setProperty('background-color', '#050506', 'important');
@@ -402,20 +462,49 @@
             </button>
         </div>
 
+        @php $activeFilterChips = $this->getActiveFilterChips(); @endphp
+        @if(!empty($activeFilterChips))
+            <div class="mpm-active-filters">
+                @foreach($activeFilterChips as $chip)
+                    <button type="button" class="mpm-active-filter"
+                            wire:click="removeFilterChip('{{ $chip['type'] }}', '{{ $chip['value'] }}')"
+                            title="Remove filter">
+                        <span>{{ $chip['label'] }}</span><span class="mpm-active-filter__x">×</span>
+                    </button>
+                @endforeach
+            </div>
+        @endif
+
         <div class="mpm-filterpanel" x-show="filtersOpen" x-cloak x-transition>
             <div class="mpm-filtergrid">
                 <div>
-                    <label class="mpm-label">{{ $isPlugins ? 'Platform' : 'Loader' }}</label>
-                    <div class="mpm-select-wrap">
-                        <select class="mpm-select" wire:model="filterLoader">
-                            <option value="">Any {{ $isPlugins ? 'platform' : 'loader' }}</option>
-                            @foreach($this->getFilterLoaderOptions() as $slug => $label)
-                                <option value="{{ $slug }}">{{ $label }}</option>
-                            @endforeach
-                        </select>
-                        <svg class="caret" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+                    <label class="mpm-label">{{ $isPlugins ? 'Platforms' : 'Loaders' }} <span style="font-weight:500;color:var(--mpm-muted);">(pick more than one)</span></label>
+                    <div class="mpm-loader-picks">
+                        @foreach($this->getFilterLoaderOptions() as $slug => $label)
+                            <button type="button" wire:click="toggleLoader('{{ $slug }}')"
+                                    class="mpm-filterchip {{ in_array($slug, $filterLoaders, true) ? 'is-active' : '' }}">
+                                <span class="dot"></span>{{ $label }}
+                            </button>
+                        @endforeach
                     </div>
+                    @if($isPlugins && $provider !== 'modrinth')
+                        <p class="mpm-filter-note">CurseForge does not expose Paper/Purpur/etc. as a searchable plugin-platform facet. In All Sources those platform choices narrow Modrinth results while CurseForge remains filtered by the Minecraft version selected above.</p>
+                    @endif
                 </div>
+                @if(!$isPlugins)
+                    <div>
+                        <label class="mpm-label">Categories <span style="font-weight:500;color:var(--mpm-muted);">(pick any)</span></label>
+                        <div class="mpm-loader-picks">
+                            @foreach($this->getCategoryFilterOptions() as $slug => $label)
+                                <button type="button" wire:click="toggleCategory('{{ $slug }}')"
+                                        class="mpm-filterchip {{ in_array($slug, $filterCategories, true) ? 'is-active' : '' }}">
+                                    <span class="dot"></span>{{ $label }}
+                                </button>
+                            @endforeach
+                        </div>
+                        <p class="mpm-filter-note">These use the closest matching category on CurseForge and Modrinth, so the same pills work in All Sources.</p>
+                    </div>
+                @endif
             </div>
             <div class="mpm-filteractions">
                 @if($activeFilters)
@@ -499,6 +588,17 @@
         </div>
     @endif
 
+    @if(!empty($providerErrors) && $provider === 'all')
+        <div class="mpm-provider-warning mpm-rise">
+            <svg fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
+            <div>
+                <b>Some sources could not be reached.</b> Results from the other provider are still shown.
+                <div style="margin-top:3px;opacity:.9;">{{ implode(' ', array_values($providerErrors)) }}</div>
+            </div>
+            <button type="button" wire:click="retryProviderSearches">Retry</button>
+        </div>
+    @endif
+
     {{-- ══════════ Results ══════════ --}}
     @if($isLoading)
         <div class="mpm-feed">
@@ -528,6 +628,8 @@
                     $pv = $item['provider'] ?? '';
                     $pvLabel = ['curseforge'=>'CurseForge','modrinth'=>'Modrinth'][$pv] ?? ucfirst($pv);
                     $pvColor = ['curseforge'=>'var(--mpm-cf)','modrinth'=>'var(--mpm-mr)'][$pv] ?? '#8b8aa3';
+                    $siteUrl = $this->itemWebsiteUrl($item);
+                    $galleryCount = count($item['gallery'] ?? []);
                 @endphp
                 <div class="mpm-row mpm-rise" style="--row-c:{{ $pvColor }}; animation-delay: {{ min($i * 40, 320) }}ms"
                      role="button" tabindex="0"
@@ -566,6 +668,25 @@
                         </div>
                     </div>
 
+                    <div class="mpm-row__quick">
+                        <button type="button" class="mpm-quickbtn mpm-quickbtn--grow"
+                                wire:click.stop="openItemInfo('{{ $item['id'] }}', '{{ $pv }}', 'description')">
+                            <svg fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 10h8M8 14h5m-7 7l-4-4V5a2 2 0 012-2h16a2 2 0 012 2v12a2 2 0 01-2 2H8l-2 2z"/></svg>
+                            Description
+                        </button>
+                        <button type="button" class="mpm-quickbtn mpm-quickbtn--grow"
+                                wire:click.stop="openItemInfo('{{ $item['id'] }}', '{{ $pv }}', 'gallery')">
+                            <svg fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
+                            Gallery{{ $galleryCount ? ' · '.$galleryCount : '' }}
+                        </button>
+                        @if($siteUrl)
+                            <a href="{{ $siteUrl }}" target="_blank" rel="noopener noreferrer" class="mpm-quickbtn" @click.stop title="Open {{ $noun }} page">
+                                <svg fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14 3h7m0 0v7m0-7L10 14M5 5h5M5 5a2 2 0 00-2 2v12a2 2 0 002 2h12a2 2 0 002-2v-5"/></svg>
+                                Open
+                            </a>
+                        @endif
+                    </div>
+
                     <div class="mpm-row__cta">
                         <span class="mpm-cta-state mpm-cta--install">
                             <svg fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
@@ -578,6 +699,15 @@
                 </div>
             @endforeach
         </div>
+
+        @if($hasMore)
+            <div class="mpm-more">
+                <button type="button" class="mpm-btn mpm-btn--ghost mpm-more__btn" wire:click="loadMore" wire:loading.attr="disabled" wire:target="loadMore">
+                    <span wire:loading.remove wire:target="loadMore">Load 20 more</span>
+                    <span wire:loading wire:target="loadMore">Loading more…</span>
+                </button>
+            </div>
+        @endif
 
     @else
         <div class="mpm-empty mpm-rise">
@@ -713,6 +843,89 @@
                 </div>
             @endif
         </div>
+
+        <div class="mpm-info-scrim" x-show="infoOpen" x-cloak x-transition.opacity
+             @click.self="$wire.closeItemInfo()"></div>
+
+        <div class="mpm-info" x-show="infoOpen" x-cloak x-transition>
+            @if($infoItem)
+                @php
+                    $infoSiteUrl = $this->itemWebsiteUrl($infoItem);
+                    $infoDescription = trim((string) ($infoItem['description'] ?? $infoItem['summary'] ?? ''));
+                    $infoGallery = array_values(array_filter(
+                        $infoItem['gallery'] ?? [],
+                        fn ($image) => is_array($image) && $this->externalUrl($image['url'] ?? null)
+                    ));
+                @endphp
+                <div class="mpm-info__head">
+                    @if(!empty($infoItem['iconUrl']))
+                        <img src="{{ $infoItem['iconUrl'] }}" alt="" class="mpm-info__art">
+                    @endif
+                    <div class="mpm-info__title">
+                        <p class="mpm-info__eyebrow">{{ $infoMode === 'gallery' ? 'Gallery' : 'Description' }}</p>
+                        <h3 class="mpm-info__name">{{ $infoItem['name'] ?? $Noun }}</h3>
+                    </div>
+                    <button type="button" class="mpm-dhero__close" @click="$wire.closeItemInfo()" aria-label="Close">
+                        <svg fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+                    </button>
+                </div>
+
+                <div class="mpm-info__body">
+                    @if($infoError !== '')
+                        <div class="mpm-info__error">{{ $infoError }}</div>
+                    @endif
+
+                    @if($infoMode === 'gallery')
+                        @if(!empty($infoGallery))
+                            <div class="mpm-gallery">
+                                @foreach($infoGallery as $image)
+                                    @php
+                                        $imageUrl = $this->externalUrl($image['url'] ?? null);
+                                        $thumbUrl = $this->externalUrl($image['thumbnailUrl'] ?? null) ?? $imageUrl;
+                                        $caption = trim((string) ($image['title'] ?? $image['description'] ?? ''));
+                                    @endphp
+                                    @if($imageUrl)
+                                        <button type="button" class="mpm-gallery__item"
+                                                data-url="{{ $imageUrl }}" data-caption="{{ $caption }}"
+                                                onclick="const d=document.getElementById('mpm-item-gallery-preview'),i=document.getElementById('mpm-item-gallery-preview-image'),c=document.getElementById('mpm-item-gallery-preview-caption'); if(!d||!i)return; i.src=this.dataset.url; if(c){c.textContent=this.dataset.caption||''; c.hidden=!this.dataset.caption;} if(!d.open)d.showModal();">
+                                            <img src="{{ $thumbUrl }}" alt="{{ $caption }}" loading="lazy">
+                                            @if($caption !== '')
+                                                <div class="mpm-gallery__cap">{{ $caption }}</div>
+                                            @endif
+                                        </button>
+                                    @endif
+                                @endforeach
+                            </div>
+                        @else
+                            <div class="mpm-gallery__empty">No gallery images are available for this {{ $noun }}.</div>
+                        @endif
+                    @else
+                        @if($infoDescription !== '')
+                            <p class="mpm-description">{{ $infoDescription }}</p>
+                        @else
+                            <div class="mpm-gallery__empty">No full description is available for this {{ $noun }}.</div>
+                        @endif
+                    @endif
+                </div>
+
+                <div class="mpm-info__foot">
+                    @if($infoSiteUrl)
+                        <a href="{{ $infoSiteUrl }}" target="_blank" rel="noopener noreferrer" class="mpm-btn mpm-btn--ghost">Open {{ $noun }} page</a>
+                    @endif
+                    <button type="button" class="mpm-btn mpm-btn--primary" @click="$wire.closeItemInfo()">Close</button>
+                </div>
+            @endif
+        </div>
+
+        <dialog id="mpm-item-gallery-preview" class="mpm-gallery-dialog" onclick="if (event.target === this) this.close()">
+            <div class="mpm-gallery-dialog__panel">
+                <button type="button" class="mpm-gallery-dialog__close" onclick="this.closest('dialog').close()" aria-label="Close image">×</button>
+                <div class="mpm-gallery-dialog__stage">
+                    <img id="mpm-item-gallery-preview-image" class="mpm-gallery-dialog__img" src="" alt="">
+                </div>
+                <div id="mpm-item-gallery-preview-caption" class="mpm-gallery-dialog__cap" hidden></div>
+            </div>
+        </dialog>
 
     </div>
     </template>

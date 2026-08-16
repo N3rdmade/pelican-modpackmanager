@@ -60,24 +60,30 @@ class ModpackBrowserPage extends Page
     public string $search    = '';
     public string $provider  = 'all';   // 'all' | 'curseforge' | 'modrinth' | 'ftb' | 'atlauncher'
 
-    // Facet filters (best-effort; only the browsable providers honour them).
-    public string $filterVersion  = '';  // Minecraft version, e.g. '1.20.1'
-    public string $filterLoader   = '';  // 'forge' | 'neoforge' | 'fabric' | 'quilt'
-    public string $filterCategory = '';  // canonical category slug (see getFilterCategoryOptions)
+    public string $filterVersion  = '';
+    public array  $filterLoaders  = [];
+    public string $filterCategory = '';
+    public string $filterSort     = 'popular';
 
-    /**
-     * Providers queried by the combined "all" view. FTB (per-result detail
-     * fan-out) and ATLauncher (large list fetch) are intentionally excluded
-     * here because they slow the homepage down — they remain fully available
-     * via their own provider tabs.
-     */
-    private const COMBINED_PROVIDERS = ['curseforge', 'modrinth'];
-    public array  $modpacks  = [];
-    public bool   $isLoading = false;
-    public string $errorMsg  = '';
+    /** Providers queried by the combined "all" view. */
+    private const COMBINED_PROVIDERS = ['curseforge', 'modrinth', 'ftb', 'atlauncher'];
+    public array  $modpacks      = [];
+    public bool   $isLoading     = false;
+    public bool   $isLoadingMore = false;
+    public bool   $hasMore       = false;
+    public int    $page          = 0;
+    public int    $pageSize      = 20;
+    public string $errorMsg      = '';
+    public array  $providerErrors = [];
+
+    public bool   $showInfoModal = false;
+    public string $infoMode      = 'description';
+    public ?array $infoModpack   = null;
+    public string $infoError     = '';
 
     // Install modal state
     public bool    $showModal       = false;
+    public bool    $showInstallConfirmation = false;
     public ?array  $selectedModpack = null;
     public array   $versions        = [];
     public bool    $versionsLoading = false;
@@ -241,16 +247,25 @@ class ModpackBrowserPage extends Page
         return ModpackInstall::STEPS;
     }
 
-    // ─── Filter options (drive the browser's filter panel) ─────────────────────
+    // ─── Filter options ───────────────────────────────────────────────────────
 
-    /**
-     * Minecraft versions offered in the filter. Pulled live from CurseForge
-     * (cached a day) so the list stays complete and current; falls back to a
-     * curated static list when CurseForge is unavailable (no API key / network).
-     */
     public function getFilterVersionOptions(): array
     {
-        $versions = app(CurseForgeService::class)->getMinecraftVersions();
+        $versions = [];
+
+        try {
+            $versions = app(CurseForgeService::class)->getMinecraftVersions();
+        } catch (Throwable) {
+            // CurseForge may be disabled when no API key is configured.
+        }
+
+        if (empty($versions)) {
+            try {
+                $versions = app(ModrinthService::class)->getMinecraftVersions();
+            } catch (Throwable) {
+                $versions = [];
+            }
+        }
 
         return !empty($versions) ? $versions : [
             '1.21.1', '1.21', '1.20.6', '1.20.4', '1.20.1', '1.20',
@@ -258,7 +273,6 @@ class ModpackBrowserPage extends Page
         ];
     }
 
-    /** Canonical loader slug → label. */
     public function getFilterLoaderOptions(): array
     {
         return [
@@ -269,135 +283,268 @@ class ModpackBrowserPage extends Page
         ];
     }
 
-    /**
-     * Whether the category filter applies to the active provider. FTB and
-     * ATLauncher have no category facet, so the control is hidden for them.
-     */
+    public function getSortOptions(): array
+    {
+        return [
+            'popular' => 'Popular',
+            'updated' => 'Recently updated',
+            'name'    => 'Name A–Z',
+        ];
+    }
+
+    public function loaderFilterAvailable(): bool
+    {
+        return $this->provider !== 'atlauncher';
+    }
+
     public function categoryFilterAvailable(): bool
     {
         return in_array($this->provider, ['all', 'curseforge', 'modrinth'], true);
     }
 
-    /**
-     * Category options for the active provider, fetched live and cached a day:
-     *  - Modrinth view → Modrinth categories (option value = Modrinth slug).
-     *  - All sources / CurseForge → CurseForge categories (value = CF category id).
-     * The value carries provider-specific semantics; the services apply it only to
-     * the provider it belongs to. Falls back to a static list per provider when the
-     * live fetch is unavailable.
-     *
-     * @return array<string, string> option value => label
-     */
     public function getFilterCategoryOptions(): array
     {
+        if ($this->provider === 'all') {
+            return [
+                'adventure'   => 'Adventure / RPG',
+                'technology'  => 'Technology',
+                'magic'       => 'Magic',
+                'quests'      => 'Quests',
+                'combat'      => 'Combat',
+                'lightweight' => 'Lightweight',
+                'hardcore'    => 'Hardcore / Challenging',
+            ];
+        }
+
         if ($this->provider === 'modrinth') {
             $categories = app(ModrinthService::class)->getCategories();
 
             if (!empty($categories)) {
                 $options = [];
-                foreach ($categories as $c) {
-                    $options[$c['slug']] = $c['name'];
+                foreach ($categories as $category) {
+                    $options[$category['slug']] = $category['name'];
                 }
                 return $options;
             }
 
             return [
-                'adventure'    => 'Adventure',
-                'challenging'  => 'Challenging',
-                'combat'       => 'Combat',
-                'kitchen-sink' => 'Kitchen Sink',
-                'lightweight'  => 'Lightweight',
-                'magic'        => 'Magic',
-                'multiplayer'  => 'Multiplayer',
-                'optimization' => 'Optimization',
-                'quests'       => 'Quests',
-                'technology'   => 'Technology',
+                'adventure' => 'Adventure', 'challenging' => 'Challenging', 'combat' => 'Combat',
+                'kitchen-sink' => 'Kitchen Sink', 'lightweight' => 'Lightweight', 'magic' => 'Magic',
+                'multiplayer' => 'Multiplayer', 'optimization' => 'Optimization', 'quests' => 'Quests',
+                'technology' => 'Technology',
             ];
         }
 
-        // All sources / CurseForge → CurseForge categories (value = CF category id).
         $categories = app(CurseForgeService::class)->getCategories();
-
         if (!empty($categories)) {
             $options = [];
-            foreach ($categories as $c) {
-                $options[(string) $c['id']] = $c['name'];
+            foreach ($categories as $category) {
+                $options[(string) $category['id']] = $category['name'];
             }
             return $options;
         }
 
         return [
-            '4475' => 'Adventure and RPG',
-            '4472' => 'Tech',
-            '4473' => 'Magic',
-            '4478' => 'Quests',
-            '4483' => 'Combat / PvP',
-            '4476' => 'Exploration',
-            '4477' => 'Skyblock',
-            '4481' => 'Small / Light',
-            '4474' => 'Sci-Fi',
+            '4475' => 'Adventure and RPG', '4472' => 'Tech', '4473' => 'Magic',
+            '4478' => 'Quests', '4483' => 'Combat / PvP', '4476' => 'Exploration',
+            '4477' => 'Skyblock', '4481' => 'Small / Light', '4474' => 'Sci-Fi',
             '4479' => 'Hardcore',
         ];
     }
 
-    /**
-     * The active filters as passed to the provider services. Empty entries are
-     * dropped so a service only constrains on what the user actually chose.
-     *
-     * @return array<string, string>
-     */
     private function activeFilters(): array
     {
-        return array_filter([
-            'gameVersion' => $this->filterVersion,
-            'loader'      => $this->filterLoader,
-            'category'    => $this->filterCategory,
-        ], fn ($v) => $v !== '');
+        $filters = [];
+
+        if ($this->filterVersion !== '') {
+            $filters['gameVersion'] = $this->filterVersion;
+        }
+        if ($this->provider !== 'atlauncher' && !empty($this->filterLoaders)) {
+            $filters['loaders'] = array_values($this->filterLoaders);
+            if (count($this->filterLoaders) === 1) {
+                $filters['loader'] = $this->filterLoaders[0];
+            }
+        }
+        if ($this->categoryFilterAvailable() && $this->filterCategory !== '') {
+            $filters['category'] = $this->filterCategory;
+        }
+
+        return $filters;
     }
 
-    /** How many filters are currently set (drives the panel's badge). */
     public function getActiveFilterCount(): int
     {
-        return count($this->activeFilters());
+        return ($this->filterVersion !== '' ? 1 : 0)
+            + count($this->filterLoaders)
+            + ($this->filterCategory !== '' && $this->categoryFilterAvailable() ? 1 : 0)
+            + ($this->filterSort !== 'popular' ? 1 : 0);
     }
 
-    // ─── Actions ──────────────────────────────────────────────────────────────
+    public function getActiveFilterChips(): array
+    {
+        $chips = [];
 
-    /**
-     * Called by search input (wire:model.lazy + wire:keydown.enter) and filter changes.
-     */
+        if ($this->filterVersion !== '') {
+            $chips[] = ['type' => 'version', 'value' => $this->filterVersion, 'label' => 'MC ' . $this->filterVersion];
+        }
+
+        $loaderLabels = $this->getFilterLoaderOptions();
+        foreach ($this->filterLoaders as $loader) {
+            $chips[] = [
+                'type' => 'loader',
+                'value' => $loader,
+                'label' => $loaderLabels[$loader] ?? ucfirst($loader),
+            ];
+        }
+
+        if ($this->filterCategory !== '' && $this->categoryFilterAvailable()) {
+            $categoryLabels = $this->getFilterCategoryOptions();
+            $chips[] = [
+                'type' => 'category',
+                'value' => $this->filterCategory,
+                'label' => $categoryLabels[$this->filterCategory] ?? $this->filterCategory,
+            ];
+        }
+
+        if ($this->filterSort !== 'popular') {
+            $sortLabels = $this->getSortOptions();
+            $chips[] = [
+                'type' => 'sort',
+                'value' => $this->filterSort,
+                'label' => $sortLabels[$this->filterSort] ?? $this->filterSort,
+            ];
+        }
+
+        return $chips;
+    }
+
+    public function removeFilterChip(string $type, string $value = ''): void
+    {
+        if ($type === 'version') {
+            $this->filterVersion = '';
+        } elseif ($type === 'loader') {
+            $this->filterLoaders = array_values(array_filter(
+                $this->filterLoaders,
+                fn ($loader) => $loader !== strtolower(trim($value))
+            ));
+        } elseif ($type === 'category') {
+            $this->filterCategory = '';
+        } elseif ($type === 'sort') {
+            $this->filterSort = 'popular';
+        } else {
+            return;
+        }
+
+        $this->resetResults();
+        $this->loadModpacks();
+    }
+
+    public function toggleLoader(string $loader): void
+    {
+        $loader = strtolower(trim($loader));
+        if (!array_key_exists($loader, $this->getFilterLoaderOptions())) {
+            return;
+        }
+
+        if (in_array($loader, $this->filterLoaders, true)) {
+            $this->filterLoaders = array_values(array_filter($this->filterLoaders, fn ($item) => $item !== $loader));
+        } else {
+            $this->filterLoaders[] = $loader;
+            $this->filterLoaders = array_values(array_unique($this->filterLoaders));
+        }
+    }
+
     public function searchModpacks(): void
     {
+        $this->resetResults();
         $this->loadModpacks();
     }
 
-    /**
-     * Re-run the current search with the chosen facet filters applied.
-     */
     public function applyFilters(): void
     {
+        $this->resetResults();
         $this->loadModpacks();
     }
 
-    /**
-     * Reset all facet filters and reload.
-     */
     public function clearFilters(): void
     {
         $this->filterVersion  = '';
-        $this->filterLoader   = '';
+        $this->filterLoaders  = [];
         $this->filterCategory = '';
+        $this->filterSort     = 'popular';
+        $this->resetResults();
         $this->loadModpacks();
     }
 
     public function setProvider(string $provider): void
     {
+        if (!in_array($provider, ['all', 'curseforge', 'modrinth', 'ftb', 'atlauncher'], true)) {
+            return;
+        }
+
         $this->provider = $provider;
-        $this->search   = '';
-        // Category values are provider-specific (CurseForge ids vs Modrinth slugs),
-        // so a value picked under one provider is meaningless under another.
         $this->filterCategory = '';
+        if ($provider === 'atlauncher') {
+            $this->filterLoaders = [];
+        }
+        $this->resetResults();
         $this->loadModpacks();
+    }
+
+    public function loadMore(): void
+    {
+        if ($this->isLoading || $this->isLoadingMore || !$this->hasMore) {
+            return;
+        }
+
+        $this->page++;
+        $this->loadModpacks(true);
+    }
+
+    public function openPackInfo(string|int $modpackId, string $provider, string $mode = 'description'): void
+    {
+        if (!in_array($mode, ['description', 'gallery'], true)) {
+            $mode = 'description';
+        }
+
+        $this->infoMode = $mode;
+        $this->infoError = '';
+        $this->infoModpack = collect($this->modpacks)->first(
+            fn ($pack) => (string) ($pack['id'] ?? '') === (string) $modpackId
+                && ($pack['provider'] ?? null) === $provider
+        );
+        $this->showInfoModal = true;
+
+        try {
+            $details = $this->fetchSingleModpack($modpackId, $provider);
+            $this->infoModpack = array_merge($this->infoModpack ?? [], $details);
+
+            if ($provider === 'curseforge') {
+                $description = app(CurseForgeService::class)->getDescription((int) $modpackId);
+                if ($description !== '') {
+                    $this->infoModpack['description'] = $description;
+                }
+            }
+        } catch (Throwable $e) {
+            $this->infoError = 'Could not load the full modpack details.';
+            Log::info('[ModpackManager] Modpack detail lookup failed', [
+                'provider' => $provider,
+                'id' => (string) $modpackId,
+                'error' => $e->getMessage(),
+            ]);
+        }
+    }
+
+    public function closePackInfo(): void
+    {
+        $this->showInfoModal = false;
+        $this->infoModpack = null;
+        $this->infoError = '';
+    }
+
+    public function externalUrl(?string $url): ?string
+    {
+        return is_string($url) && preg_match('#^https?://#i', $url) ? $url : null;
     }
 
     /**
@@ -428,13 +575,17 @@ class ModpackBrowserPage extends Page
         $this->versions         = [];
         $this->selectedVersion  = null;
         $this->versionsLoading  = true;
-        $this->deleteExisting    = false;
+        $isSameInstalledPack = $this->installedModpack
+            && (string) ($this->installedModpack['id'] ?? '') === (string) ($modpack['id'] ?? '')
+            && ($this->installedModpack['provider'] ?? null) === ($modpack['provider'] ?? null);
+        $this->deleteExisting    = !$isSameInstalledPack;
         $this->createBackup      = $this->canCreateBackups;
         $this->deleteWorld       = false;
         $this->deleteBackups     = false;
         $this->selectedBackupIds = [];
         $this->availableBackups  = [];
         $this->detectedWorlds    = [];
+        $this->showInstallConfirmation = false;
         $this->showModal         = true;
 
         // Don't block opening the modal on the version fetch — the modal pops up
@@ -445,6 +596,7 @@ class ModpackBrowserPage extends Page
 
     public function closeModal(): void
     {
+        $this->showInstallConfirmation = false;
         $this->showModal         = false;
         $this->selectedModpack   = null;
         $this->versions          = [];
@@ -471,8 +623,8 @@ class ModpackBrowserPage extends Page
             $id = $this->selectedModpack['id'];
 
             $this->versions = match ($this->selectedModpack['provider']) {
-                'curseforge' => app(CurseForgeService::class)->getFiles((int) $id),
-                'modrinth'   => app(ModrinthService::class)->getVersions((string) $id),
+                'curseforge' => app(CurseForgeService::class)->getFiles((int) $id, $this->activeFilters()),
+                'modrinth'   => app(ModrinthService::class)->getVersions((string) $id, ['forge', 'fabric', 'quilt', 'neoforge'], $this->activeFilters()),
                 'ftb'        => app(FtbService::class)->getVersions((string) $id),
                 'atlauncher' => app(ATLauncherService::class)->getVersions((string) $id),
                 default      => [],
@@ -491,6 +643,73 @@ class ModpackBrowserPage extends Page
         }
     }
 
+    public function reviewInstall(): void
+    {
+        $this->authorizeManage();
+
+        if (!$this->selectedModpack || !$this->selectedVersion) {
+            Notification::make()->title('Please select a version.')->warning()->send();
+            return;
+        }
+
+        $this->showInstallConfirmation = true;
+    }
+
+    public function cancelInstallConfirmation(): void
+    {
+        $this->showInstallConfirmation = false;
+    }
+
+    public function getInstallReview(): array
+    {
+        if (!$this->selectedModpack || !$this->selectedVersion) {
+            return [];
+        }
+
+        $provider = (string) ($this->selectedModpack['provider'] ?? '');
+        $version = collect($this->versions)->firstWhere('id', $this->selectedVersion);
+        $loaders = array_values(array_unique(array_filter(array_map(
+            function ($loader) {
+                $loader = strtolower((string) $loader);
+                return match ($loader) {
+                    'neoforge' => 'NeoForge',
+                    'forge' => 'Forge',
+                    'fabric' => 'Fabric',
+                    'quilt' => 'Quilt',
+                    default => $loader !== '' ? ucfirst($loader) : null,
+                };
+            },
+            (array) ($version['loaders'] ?? [])
+        ))));
+
+        if (empty($loaders)) {
+            foreach ((array) ($version['gameVersions'] ?? []) as $candidate) {
+                $candidate = strtolower((string) $candidate);
+                if (in_array($candidate, ['forge', 'neoforge', 'fabric', 'quilt'], true)) {
+                    $loaders[] = $candidate === 'neoforge' ? 'NeoForge' : ucfirst($candidate);
+                }
+            }
+        }
+
+        return [
+            'name' => (string) ($this->selectedModpack['name'] ?? 'Modpack'),
+            'provider' => match ($provider) {
+                'curseforge' => 'CurseForge',
+                'modrinth' => 'Modrinth',
+                'ftb' => 'FTB',
+                'atlauncher' => 'ATLauncher',
+                default => ucfirst($provider),
+            },
+            'version' => $this->getVersionLabel($provider, (string) $this->selectedVersion),
+            'loaders' => $loaders,
+            'backup' => $this->createBackup,
+            'wipeFiles' => $this->deleteExisting,
+            'deleteWorld' => $this->deleteWorld,
+            'deleteBackups' => $this->deleteBackups,
+            'backupCount' => count($this->selectedBackupIds),
+        ];
+    }
+
     /**
      * Dispatch the installation job.
      */
@@ -503,6 +722,12 @@ class ModpackBrowserPage extends Page
             return;
         }
 
+        if (!$this->showInstallConfirmation) {
+            $this->reviewInstall();
+            return;
+        }
+
+        $this->showInstallConfirmation = false;
         $server   = $this->getServer();
         $provider = $this->selectedModpack['provider'];
 
@@ -525,9 +750,10 @@ class ModpackBrowserPage extends Page
         // lists from the provider API.
         if ($provider === 'curseforge') {
             $spec = [
-                'provider' => 'curseforge',
-                'mod_id'   => (int) $this->selectedModpack['id'],
-                'file_id'  => (int) $this->selectedVersion,
+                'provider'         => 'curseforge',
+                'mod_id'           => (int) $this->selectedModpack['id'],
+                'file_id'          => (int) $this->selectedVersion,
+                'preferred_loader' => $this->preferredLoaderForSelectedVersion(),
             ];
         } elseif ($provider === 'modrinth') {
             $version = collect($this->versions)->firstWhere('id', $this->selectedVersion);
@@ -814,7 +1040,7 @@ class ModpackBrowserPage extends Page
 
         $server = $this->getServer();
 
-        $this->availableBackups = user()?->can(SubuserPermission::BackupRead, $server)
+        $this->availableBackups = $this->canReadBackups
             ? Backup::query()
                 ->where('server_id', $server->id)
                 ->orderByDesc('created_at')
@@ -1004,65 +1230,169 @@ class ModpackBrowserPage extends Page
             && trim($latestLabel) !== trim((string) $record->modpack_version);
     }
 
-    private function loadModpacks(): void
+    private function resetResults(): void
     {
-        $this->isLoading = true;
-        $this->errorMsg  = '';
-        $this->modpacks  = [];
+        $this->page = 0;
+        $this->hasMore = false;
+        $this->modpacks = [];
+    }
+
+    private function loadModpacks(bool $append = false): void
+    {
+        if ($append) {
+            $this->isLoadingMore = true;
+        } else {
+            $this->isLoading = true;
+            $this->modpacks = [];
+        }
+
+        $this->errorMsg = '';
+        if (!$append) {
+            $this->providerErrors = [];
+        }
 
         try {
             $filters = $this->activeFilters();
 
             if ($this->provider === 'all') {
-                $this->modpacks = $this->searchAllProviders($this->search, filters: $filters);
+                [$results, $hasMore] = $this->searchAllProviders($this->search, $this->page, filters: $filters);
             } else {
-                $this->modpacks = $this->providerService($this->provider)->search($this->search, filters: $filters);
+                $results = $this->providerService($this->provider)->search(
+                    $this->search,
+                    $this->page,
+                    $this->pageSize,
+                    $filters
+                );
+                $hasMore = count($results) >= $this->pageSize;
             }
+
+            $results = $this->sortResults($results);
+
+            if ($append) {
+                $existing = [];
+                foreach ($this->modpacks as $pack) {
+                    $existing[($pack['provider'] ?? '') . ':' . ($pack['id'] ?? '')] = $pack;
+                }
+                foreach ($results as $pack) {
+                    $existing[($pack['provider'] ?? '') . ':' . ($pack['id'] ?? '')] = $pack;
+                }
+                $this->modpacks = array_values($existing);
+                $this->modpacks = $this->sortResults($this->modpacks);
+            } else {
+                $this->modpacks = $results;
+            }
+
+            $this->hasMore = $hasMore;
         } catch (Throwable $e) {
+            if ($append && $this->page > 0) {
+                $this->page--;
+            }
             $this->errorMsg = $e->getMessage();
             Log::warning('[ModpackManager] Failed to load modpacks', ['error' => $e->getMessage()]);
         } finally {
             $this->isLoading = false;
+            $this->isLoadingMore = false;
         }
     }
 
     /**
-     * Query the combined-view providers (CurseForge + Modrinth — the fast ones)
-     * and interleave the results (round-robin) so each source is represented
-     * near the top rather than one drowning out the rest. A single provider
-     * failing (e.g. CurseForge key missing) is logged and skipped, never
-     * aborting the whole search. FTB/ATLauncher are excluded here for speed and
-     * are reached through their own tabs.
-     *
-     * @return array<int, array<string, mixed>>
+     * @return array{0:array<int,array<string,mixed>>,1:bool}
      */
-    private function searchAllProviders(string $query, int $perProvider = 10, array $filters = []): array
+    private function searchAllProviders(string $query, int $page = 0, int $perProvider = 0, array $filters = []): array
     {
-        $buckets = [];
+        $providers = array_values(array_filter(
+            self::COMBINED_PROVIDERS,
+            fn (string $provider) => $this->providerSupportsFilters($provider, $filters)
+        ));
 
-        foreach (self::COMBINED_PROVIDERS as $provider) {
+        if (empty($providers)) {
+            return [[], false];
+        }
+
+        $perProvider = $perProvider > 0
+            ? $perProvider
+            : max(1, (int) ceil($this->pageSize / count($providers)));
+
+        $buckets = [];
+        $hasMore = false;
+
+        foreach ($providers as $provider) {
             try {
-                $buckets[$provider] = array_slice(
-                    $this->providerService($provider)->search($query, filters: $filters),
-                    0,
-                    $perProvider
-                );
+                $providerFilters = $this->filtersForProvider($provider, $filters);
+                $packs = $this->providerService($provider)->search($query, $page, $perProvider, $providerFilters);
+                unset($this->providerErrors[$provider]);
+                $buckets[$provider] = $packs;
+                $hasMore = $hasMore || count($packs) >= $perProvider;
             } catch (Throwable $e) {
+                $this->providerErrors[$provider] = $this->providerLabel($provider) . ' is temporarily unavailable.';
                 Log::info("[ModpackManager] '{$provider}' search skipped in combined view", ['error' => $e->getMessage()]);
                 $buckets[$provider] = [];
             }
         }
 
         $merged = [];
-        for ($i = 0; $i < $perProvider; $i++) {
+        for ($i = 0; $i < $perProvider && count($merged) < $this->pageSize; $i++) {
             foreach ($buckets as $packs) {
                 if (isset($packs[$i])) {
                     $merged[] = $packs[$i];
+                    if (count($merged) >= $this->pageSize) {
+                        break;
+                    }
                 }
             }
         }
 
-        return $merged;
+        return [$merged, $hasMore];
+    }
+
+    public function retryProviderSearches(): void
+    {
+        $this->resetResults();
+        $this->loadModpacks();
+    }
+
+    private function providerLabel(string $provider): string
+    {
+        return match ($provider) {
+            'curseforge' => 'CurseForge',
+            'modrinth' => 'Modrinth',
+            'ftb' => 'FTB',
+            'atlauncher' => 'ATLauncher',
+            default => ucfirst($provider),
+        };
+    }
+
+    private function providerSupportsFilters(string $provider, array $filters): bool
+    {
+        if (!empty($filters['category']) && !in_array($provider, ['curseforge', 'modrinth'], true)) {
+            return false;
+        }
+
+        if ((!empty($filters['loaders']) || !empty($filters['loader'])) && $provider === 'atlauncher') {
+            return false;
+        }
+
+        return true;
+    }
+
+    private function filtersForProvider(string $provider, array $filters): array
+    {
+        if ($provider === 'modrinth' && ($filters['category'] ?? '') === 'hardcore') {
+            $filters['category'] = 'challenging';
+        }
+
+        return $filters;
+    }
+
+    private function sortResults(array $packs): array
+    {
+        if ($this->filterSort === 'name') {
+            usort($packs, fn ($a, $b) => strcasecmp((string) ($a['name'] ?? ''), (string) ($b['name'] ?? '')));
+        } elseif ($this->filterSort === 'updated') {
+            usort($packs, fn ($a, $b) => strtotime((string) ($b['dateModified'] ?? '1970-01-01')) <=> strtotime((string) ($a['dateModified'] ?? '1970-01-01')));
+        }
+
+        return $packs;
     }
 
     private function fetchSingleModpack(string|int $id, ?string $provider = null): array
@@ -1112,6 +1442,21 @@ class ModpackBrowserPage extends Page
         }
 
         return $url;
+    }
+
+    private function preferredLoaderForSelectedVersion(): ?string
+    {
+        $version = collect($this->versions)->firstWhere('id', $this->selectedVersion);
+        $candidates = array_merge((array) ($version['loaders'] ?? []), (array) ($version['gameVersions'] ?? []));
+
+        foreach ($candidates as $candidate) {
+            $loader = strtolower((string) $candidate);
+            if (in_array($loader, ['forge', 'neoforge', 'fabric', 'quilt'], true)) {
+                return $loader;
+            }
+        }
+
+        return count($this->filterLoaders) === 1 ? $this->filterLoaders[0] : null;
     }
 
     private function getVersionLabel(string $provider, string $versionId): string
