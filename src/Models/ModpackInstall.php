@@ -101,15 +101,15 @@ class ModpackInstall extends Model
     // ─── Step definitions ─────────────────────────────────────────────────────
 
     public const STEPS = [
-        'save_config'    => 'Save Configuration',
-        'create_backup'  => 'Create Backup',
-        'delete_files'   => 'Delete Old Files',
-        'download'       => 'Download Modpack',
-        'extract'        => 'Extract Files',
-        'restore_config' => 'Restore Configuration',
-        'merge_configs'  => 'Merge Configs',
-        'finalize'       => 'Finalize Installation',
-        'configure_loader' => 'Configure Startup / Loader',
+        'save_config'       => 'Save Server Settings',
+        'create_backup'     => 'Create Backup',
+        'delete_files'      => 'Delete Old Files',
+        'download'          => 'Download Modpack',
+        'extract'           => 'Extract Files',
+        'merge_configs'     => 'Assemble Modpack',
+        'restore_config'    => 'Restore Server Settings',
+        'finalize'          => 'Finalize Installation',
+        'configure_loader'  => 'Configure Startup / Loader',
     ];
 
     // Step statuses

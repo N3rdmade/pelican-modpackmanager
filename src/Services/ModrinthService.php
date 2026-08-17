@@ -91,9 +91,11 @@ class ModrinthService
         if (!empty($filters['gameVersion'])) {
             $facets[] = ['versions:' . $filters['gameVersion']];
         }
-        if (!empty($filters['loader'])) {
-            $facets[] = ['categories:' . $filters['loader']];
+        $requestedLoaders = $this->requestedLoaders($filters);
+        if (!empty($requestedLoaders)) {
+            $facets[] = array_map(fn (string $loader) => 'categories:' . $loader, $requestedLoaders);
         }
+        $facets[] = ['server_side:required', 'server_side:optional', 'server_side:unknown'];
         // Category applies only when the value is a Modrinth slug (Modrinth-provider
         // view). In the combined view the value is a numeric CurseForge category id,
         // which Modrinth can't map — so numeric values are intentionally skipped.
@@ -116,7 +118,7 @@ class ModrinthService
 
         $hits = $response->json('hits', []);
 
-        return array_map(fn (array $hit) => $this->normalizeHit($hit), $hits);
+        return array_map(fn (array $hit) => $this->normalizeHit($hit, 'modpack'), $hits);
     }
 
     /**
@@ -135,8 +137,26 @@ class ModrinthService
         if (!empty($filters['gameVersion'])) {
             $facets[] = ['versions:' . $filters['gameVersion']];
         }
-        if (!empty($filters['loader'])) {
-            $facets[] = ['categories:' . $filters['loader']];
+
+        $allowedLoaders = $projectType === 'plugin'
+            ? ['bukkit', 'spigot', 'paper', 'purpur', 'folia', 'sponge']
+            : ['forge', 'neoforge', 'fabric', 'quilt'];
+        $requested = $filters['loaders'] ?? (isset($filters['loader']) ? [$filters['loader']] : []);
+        $requested = array_values(array_unique(array_filter(array_map(
+            fn ($loader) => strtolower(trim((string) $loader)),
+            is_array($requested) ? $requested : [$requested]
+        ), fn ($loader) => in_array($loader, $allowedLoaders, true))));
+
+        if (!empty($requested)) {
+            $facets[] = array_map(fn (string $loader) => 'categories:' . $loader, $requested);
+        }
+
+        $categories = array_values(array_unique(array_filter(array_map(
+            fn ($category) => strtolower(trim((string) $category)),
+            is_array($filters['categories'] ?? null) ? $filters['categories'] : []
+        ), fn ($category) => preg_match('/^[a-z0-9-]+$/', $category) === 1)));
+        if (!empty($categories)) {
+            $facets[] = array_map(fn (string $category) => 'categories:' . $category, $categories);
         }
 
         $response = $this->client->get('/search', [
@@ -152,7 +172,7 @@ class ModrinthService
             throw new RuntimeException('Modrinth API request failed: ' . $response->status());
         }
 
-        return array_map(fn (array $hit) => $this->normalizeHit($hit), $response->json('hits', []));
+        return array_map(fn (array $hit) => $this->normalizeHit($hit, $projectType), $response->json('hits', []));
     }
 
     /**
@@ -210,7 +230,7 @@ class ModrinthService
     /**
      * Get a single project by ID or slug.
      */
-    public function getProject(string $idOrSlug): array
+    public function getProject(string $idOrSlug, string $projectType = 'modpack'): array
     {
         $response = $this->client->get("/project/{$idOrSlug}");
 
@@ -218,7 +238,7 @@ class ModrinthService
             throw new RuntimeException("Modrinth: could not fetch project {$idOrSlug}");
         }
 
-        return $this->normalizeProject($response->json());
+        return $this->normalizeProject($response->json(), $projectType);
     }
 
     /**
@@ -229,22 +249,25 @@ class ModrinthService
      * browser's active Minecraft version narrows the request server-side so
      * that build survives the cut.
      *
-     * The loader list stays a superset on purpose — a Quilt server loads Fabric
-     * builds and NeoForge loads Forge ones, so narrowing it to the single
-     * selected loader would hide versions that actually run.
+     * When the browser has an explicit loader filter, only versions tagged for
+     * that exact loader are returned. This keeps the selected release consistent
+     * with what the user asked to install.
      *
-     * @param  array{gameVersion?:string}  $filters
+     * @param  array{gameVersion?:string, loader?:string}  $filters
      */
     public function getVersions(string $projectId, array $loaders = ['forge', 'fabric', 'quilt', 'neoforge'], array $filters = []): array
     {
-        $versions = $this->fetchVersions($projectId, $loaders, $filters);
-
-        // A project can support the server's loader without ever tagging that
-        // exact Minecraft point release. Fall back to the unnarrowed list so the
-        // picker still offers something; the drawer warns about the mismatch.
-        if (empty($versions) && !empty($filters['gameVersion'])) {
-            $versions = $this->fetchVersions($projectId, $loaders);
+        $requested = $filters['loaders'] ?? (isset($filters['loader']) ? [$filters['loader']] : []);
+        $requested = array_values(array_unique(array_filter(array_map(
+            fn ($loader) => strtolower(trim((string) $loader)),
+            is_array($requested) ? $requested : [$requested]
+        ))));
+        $requestedLoaders = array_values(array_intersect($loaders, $requested));
+        if (!empty($requestedLoaders)) {
+            $loaders = $requestedLoaders;
         }
+
+        $versions = $this->fetchVersions($projectId, $loaders, $filters);
 
         return array_values(array_map(fn (array $v) => [
             'id'           => $v['id'],
@@ -305,7 +328,7 @@ class ModrinthService
 
     // ─── Normalise ────────────────────────────────────────────────────────────
 
-    private function normalizeHit(array $hit): array
+    private function normalizeHit(array $hit, string $projectType = 'modpack'): array
     {
         return [
             'provider'      => 'modrinth',
@@ -313,6 +336,7 @@ class ModrinthService
             'slug'          => $hit['slug'],
             'name'          => $hit['title'],
             'summary'       => $hit['description'] ?? '',
+            'description'   => $hit['description'] ?? '',
             'downloadCount' => $hit['downloads'] ?? 0,
             'iconUrl'       => $hit['icon_url'] ?? null,
             'author'        => $hit['author'] ?? 'Unknown',
@@ -321,10 +345,12 @@ class ModrinthService
             // Search hits fold loaders into `categories` alongside content tags.
             'loaders'       => $this->extractLoaders($hit['categories'] ?? []),
             'latestFileId'  => null,
+            'websiteUrl'    => !empty($hit['slug']) ? 'https://modrinth.com/' . ($projectType === 'plugin' ? 'plugin' : ($projectType === 'mod' ? 'mod' : 'modpack')) . '/' . rawurlencode((string) $hit['slug']) : null,
+            'gallery'       => $this->normalizeGallery($hit['gallery'] ?? []),
         ];
     }
 
-    private function normalizeProject(array $project): array
+    private function normalizeProject(array $project, string $projectType = 'modpack'): array
     {
         return [
             'provider'      => 'modrinth',
@@ -332,6 +358,7 @@ class ModrinthService
             'slug'          => $project['slug'],
             'name'          => $project['title'],
             'summary'       => $project['description'] ?? '',
+            'description'   => $project['body'] ?? $project['description'] ?? '',
             'downloadCount' => $project['downloads'] ?? 0,
             'iconUrl'       => $project['icon_url'] ?? null,
             'author'        => $project['team'] ?? 'Unknown',
@@ -340,7 +367,51 @@ class ModrinthService
             // Projects expose a dedicated `loaders` array; fall back to categories.
             'loaders'       => $this->extractLoaders($project['loaders'] ?? $project['categories'] ?? []),
             'latestFileId'  => null,
+            'websiteUrl'    => !empty($project['slug']) ? 'https://modrinth.com/' . ($projectType === 'plugin' ? 'plugin' : ($projectType === 'mod' ? 'mod' : 'modpack')) . '/' . rawurlencode((string) $project['slug']) : null,
+            'gallery'       => $this->normalizeGallery($project['gallery'] ?? []),
         ];
+    }
+
+    private function requestedLoaders(array $filters): array
+    {
+        $values = $filters['loaders'] ?? (isset($filters['loader']) ? [$filters['loader']] : []);
+
+        return array_values(array_unique(array_filter(array_map(
+            fn ($loader) => strtolower(trim((string) $loader)),
+            is_array($values) ? $values : [$values]
+        ), fn ($loader) => in_array($loader, ['forge', 'neoforge', 'fabric', 'quilt'], true))));
+    }
+
+    private function normalizeGallery(array $gallery): array
+    {
+        $images = [];
+
+        foreach ($gallery as $item) {
+            if (is_string($item)) {
+                $url = $item;
+                $title = null;
+                $description = null;
+            } elseif (is_array($item)) {
+                $url = $item['url'] ?? null;
+                $title = $item['title'] ?? null;
+                $description = $item['description'] ?? null;
+            } else {
+                continue;
+            }
+
+            if (!is_string($url) || !preg_match('#^https?://#i', $url)) {
+                continue;
+            }
+
+            $images[] = [
+                'url' => $url,
+                'thumbnailUrl' => $url,
+                'title' => $title,
+                'description' => $description,
+            ];
+        }
+
+        return $images;
     }
 
     /**
@@ -357,6 +428,12 @@ class ModrinthService
             'fabric'      => 'Fabric',
             'quilt'       => 'Quilt',
             'liteloader'  => 'LiteLoader',
+            'bukkit'      => 'Bukkit',
+            'spigot'      => 'Spigot',
+            'paper'       => 'Paper',
+            'purpur'      => 'Purpur',
+            'folia'       => 'Folia',
+            'sponge'      => 'Sponge',
         ];
 
         $loaders = [];

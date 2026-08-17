@@ -16,7 +16,7 @@ class InstallModpackJob implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-    public int $timeout = 1800; // 30 min – building a pack downloads many mods
+    public int $timeout = 3600; // 60 min – includes backup, download, loader install, and verification
     public int $tries   = 1;    // No retry; installation is not idempotent
 
     public function __construct(

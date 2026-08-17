@@ -15,13 +15,48 @@ return [
 
     // Files always preserved during a modpack update
     'preserved_files' => [
-        'server.properties',
         'eula.txt',
         'ops.json',
         'whitelist.json',
         'banned-players.json',
         'banned-ips.json',
         'usercache.json',
+    ],
+
+    // Operational server.properties values that may safely carry across installs.
+    // World generation, datapack selection, seed, level type, generator settings,
+    // resource-pack settings, and other pack-owned values intentionally are not here.
+    'preserved_server_properties' => [
+        'server-ip',
+        'server-port',
+        'query.port',
+        'rcon.port',
+        'rcon.password',
+        'enable-query',
+        'enable-rcon',
+        'motd',
+        'max-players',
+        'online-mode',
+        'white-list',
+        'enforce-whitelist',
+        'enable-status',
+        'hide-online-players',
+        'broadcast-console-to-ops',
+        'broadcast-rcon-to-ops',
+        'op-permission-level',
+        'function-permission-level',
+        'difficulty',
+        'gamemode',
+        'force-gamemode',
+        'hardcore',
+        'pvp',
+        'allow-flight',
+        'enable-command-block',
+        'spawn-protection',
+        'view-distance',
+        'simulation-distance',
+        'player-idle-timeout',
+        'max-tick-time',
     ],
 
     // When enabled, the installer writes a small .modpack-manager.json file into

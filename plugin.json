@@ -2,12 +2,19 @@
     "id": "modpack-manager",
     "name": "Modpack Manager",
     "author": "cosmii02",
-    "version": "1.6.8",
+    "version": "1.6.9",
     "description": "Browse, install, and update Minecraft modpacks — plus individual mods and plugins — from CurseForge, Modrinth, FTB and ATLauncher directly from the server panel.",
     "category": "plugin",
     "namespace": "Cosmii02\\ModpackManager",
     "class": "ModpackManagerPlugin",
-    "panels": ["admin", "server"],
+    "panels": [
+        "admin",
+        "server"
+    ],
     "panel_version": null,
-    "composer_packages": {}
+    "composer_packages": [],
+    "meta": {
+        "status": "enabled",
+        "status_message": null
+    }
 }

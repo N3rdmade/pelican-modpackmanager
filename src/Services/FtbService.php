@@ -40,15 +40,17 @@ class FtbService
      * Search modpacks (or list popular ones when the query is empty), then
      * resolve each id to a card via a pooled batch of detail requests.
      */
-    public function search(string $query = '', int $limit = 16, array $filters = []): array
+    public function search(string $query = '', int $page = 0, int $pageSize = 20, array $filters = []): array
     {
-        // $filters (MC version / loader / category) are accepted for interface
-        // parity with the browsable providers; FTB's search has no facet support.
         $query = trim($query);
+        $requestedLoaders = $this->requestedLoaders($filters);
+        $needsLocalFilter = !empty($filters['gameVersion']) || !empty($requestedLoaders);
+        $window = ($page + 1) * $pageSize;
+        $fetchLimit = $needsLocalFilter ? min(160, max($window * 3, $pageSize * 3)) : $window;
 
         $endpoint = $query === ''
-            ? "/modpack/popular/installs/{$limit}"
-            : '/modpack/search/' . $limit . '?term=' . rawurlencode($query);
+            ? "/modpack/popular/installs/{$fetchLimit}"
+            : '/modpack/search/' . $fetchLimit . '?term=' . rawurlencode($query);
 
         $response = $this->client()->get($endpoint);
 
@@ -57,9 +59,27 @@ class FtbService
             throw new RuntimeException('FTB API request failed: ' . $response->status());
         }
 
-        $ids = array_slice($response->json('packs', []) ?? [], 0, $limit);
+        $ids = array_values($response->json('packs', []) ?? []);
 
-        return $this->fetchPacks($ids);
+        if (!$needsLocalFilter) {
+            return $this->fetchPacks(array_slice($ids, $page * $pageSize, $pageSize));
+        }
+
+        $packs = $this->fetchPacks($ids);
+
+        if (!empty($filters['gameVersion'])) {
+            $version = (string) $filters['gameVersion'];
+            $packs = array_values(array_filter($packs, fn ($pack) => (string) ($pack['gameVersions'] ?? '') === $version));
+        }
+
+        if (!empty($requestedLoaders)) {
+            $packs = array_values(array_filter($packs, function ($pack) use ($requestedLoaders) {
+                $loaders = array_map('strtolower', $pack['loaders'] ?? []);
+                return !empty(array_intersect($requestedLoaders, $loaders));
+            }));
+        }
+
+        return array_slice($packs, $page * $pageSize, $pageSize);
     }
 
     /**
@@ -202,6 +222,7 @@ class FtbService
             'slug'          => (string) $pack['id'],
             'name'          => $pack['name'] ?? 'Unknown',
             'summary'       => $pack['synopsis'] ?? '',
+            'description'   => $pack['description'] ?? $pack['synopsis'] ?? '',
             'downloadCount' => $pack['installs'] ?? 0,
             'iconUrl'       => $this->squareArt($pack['art'] ?? []),
             'author'        => $pack['authors'][0]['name'] ?? 'FTB',
@@ -209,7 +230,39 @@ class FtbService
             'gameVersions'  => $meta['mc'] ?? null,
             'loaders'       => $meta['loader'] ? [self::LOADER_NAMES[$meta['loader']] ?? ucfirst($meta['loader'])] : [],
             'latestFileId'  => isset($pack['versions'][0]['id']) ? (string) $pack['versions'][0]['id'] : null,
+            'websiteUrl'    => 'https://www.feed-the-beast.com/modpacks/' . rawurlencode((string) $pack['id']),
+            'gallery'       => $this->galleryArt($pack['art'] ?? []),
         ];
+    }
+
+    private function requestedLoaders(array $filters): array
+    {
+        $values = $filters['loaders'] ?? (isset($filters['loader']) ? [$filters['loader']] : []);
+
+        return array_values(array_unique(array_filter(array_map(
+            fn ($loader) => strtolower(trim((string) $loader)),
+            is_array($values) ? $values : [$values]
+        ), fn ($loader) => isset(self::LOADER_NAMES[$loader]))));
+    }
+
+    private function galleryArt(array $art): array
+    {
+        $images = [];
+
+        foreach ($art as $item) {
+            if (!is_array($item) || empty($item['url']) || !preg_match('#^https?://#i', (string) $item['url'])) {
+                continue;
+            }
+
+            $images[] = [
+                'url' => (string) $item['url'],
+                'thumbnailUrl' => (string) $item['url'],
+                'title' => $item['type'] ?? null,
+                'description' => null,
+            ];
+        }
+
+        return $images;
     }
 
     private function squareArt(array $art): ?string

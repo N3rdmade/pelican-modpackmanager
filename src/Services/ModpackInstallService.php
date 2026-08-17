@@ -5,6 +5,7 @@ namespace Cosmii02\ModpackManager\Services;
 use App\Enums\EggFormat;
 use App\Models\Backup;
 use App\Models\Egg;
+use App\Models\EggVariable;
 use App\Models\Server;
 use App\Models\ServerVariable;
 use App\Repositories\Daemon\DaemonFileRepository;
@@ -15,6 +16,7 @@ use App\Services\Eggs\Sharing\EggImporterService;
 use App\Services\Servers\ReinstallServerService;
 use Cosmii02\ModpackManager\Models\ModpackInstall;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use RuntimeException;
 use Throwable;
@@ -76,10 +78,11 @@ class ModpackInstallService
                 $this->skipArchiveSteps($record);
             }
 
-            $this->stepRestoreConfig($record);
             $this->stepAssembleAndMerge($record, $plan, $spec);
+            $this->stepRestoreConfig($record, $options);
             $this->stepFinalize($record);
             $this->stepConfigureLoader($record, $plan);
+            $this->syncServerIcon($record);
 
             $record->update(['status' => 'installed', 'progress' => 100]);
             $record->appendLog('Installation completed successfully.');
@@ -95,6 +98,63 @@ class ModpackInstallService
             $record->appendLog('FATAL: ' . $e->getMessage());
 
             throw $e;
+        }
+    }
+
+    /**
+     * Mirror the installed modpack artwork onto Pelican's server icon. This is
+     * cosmetic and must never turn an otherwise successful install into a failure.
+     */
+    private function syncServerIcon(ModpackInstall $record): void
+    {
+        $url = trim((string) ($record->modpack_icon_url ?? ''));
+        if ($url === '' || !preg_match('#^https?://#i', $url)) {
+            return;
+        }
+
+        try {
+            $response = Http::timeout(20)->retry(2, 250)->get($url);
+            if ($response->failed()) {
+                throw new RuntimeException('image request returned HTTP ' . $response->status());
+            }
+
+            $data = $response->body();
+            if ($data === '') {
+                throw new RuntimeException('image response was empty');
+            }
+            if (strlen($data) > 5 * 1024 * 1024) {
+                throw new RuntimeException('image is larger than 5 MB');
+            }
+
+            $detected = @getimagesizefromstring($data);
+            $mime = is_array($detected) && !empty($detected['mime'])
+                ? strtolower((string) $detected['mime'])
+                : strtolower(trim(explode(';', (string) $response->header('Content-Type'))[0] ?? ''));
+            $extension = match ($mime) {
+                'image/png' => 'png',
+                'image/jpeg', 'image/jpg' => 'jpg',
+                'image/webp' => 'webp',
+                default => null,
+            };
+
+            if ($extension === null) {
+                throw new RuntimeException('unsupported image format');
+            }
+
+            $server = $record->server;
+            if (!$server) {
+                return;
+            }
+
+            $server->writeIcon($extension, $data);
+            $record->appendLog('  Updated the Pelican server icon from the modpack artwork.');
+        } catch (Throwable $e) {
+            Log::info('[ModpackManager] Server icon update skipped', [
+                'record' => $record->id,
+                'url' => $url,
+                'error' => $e->getMessage(),
+            ]);
+            $record->appendLog('  Server icon was not changed: ' . $e->getMessage());
         }
     }
 
@@ -160,7 +220,7 @@ class ModpackInstallService
         // The loader/MC are listed on the file metadata (e.g. ["1.20.1","NeoForge"]).
         // A downloaded *server* pack often has no manifest.json, so carry this along as
         // the authoritative loader source for the egg switch.
-        ['loader' => $cfLoader, 'mc' => $cfMc] = $this->cfLoaderMeta($file['gameVersions'] ?? []);
+        ['loader' => $cfLoader, 'mc' => $cfMc] = $this->cfLoaderMeta($file['gameVersions'] ?? [], $spec['preferred_loader'] ?? null);
 
         if (!empty($file['isServerPack'])) {
             $record->appendLog('Selected file is already a server pack — installing directly.');
@@ -174,7 +234,7 @@ class ModpackInstallService
         }
 
         if ($serverPack = $cf->findServerPackForFile($modId, $fileId, $file)) {
-            ['loader' => $serverLoader, 'mc' => $serverMc] = $this->cfLoaderMeta($serverPack['gameVersions'] ?? []);
+            ['loader' => $serverLoader, 'mc' => $serverMc] = $this->cfLoaderMeta($serverPack['gameVersions'] ?? [], $spec['preferred_loader'] ?? null);
             $serverPackId = (int) $serverPack['id'];
             $record->appendLog("Official server pack found as an additional file (#{$serverPackId}) — using it.");
 
@@ -250,12 +310,14 @@ class ModpackInstallService
 
         try {
             $properties = (string) $this->fileRepo->getContent('/server.properties', 1024 * 1024);
-        } catch (Throwable $e) {
-            throw new RuntimeException('World deletion was requested, but server.properties could not be read. Nothing was deleted.', 0, $e);
+        } catch (Throwable) {
+            $record->appendLog('World deletion enabled, but server.properties is not present. Nothing to delete; continuing.');
+            return;
         }
 
         if (!preg_match('/^\s*level-name\s*=\s*(.+?)\s*$/m', $properties, $matches)) {
-            throw new RuntimeException('World deletion was requested, but level-name could not be found in server.properties. Nothing was deleted.');
+            $record->appendLog('World deletion enabled, but server.properties has no level-name. Nothing to delete; continuing.');
+            return;
         }
 
         $levelName = trim((string) $matches[1]);
@@ -313,6 +375,15 @@ class ModpackInstallService
         }
 
         Cache::put("modpack-manager:config:{$record->id}", $saved, now()->addHours(2));
+
+        try {
+            $properties = (string) $this->fileRepo->getContent('/server.properties', 5 * 1024 * 1024);
+            Cache::put("modpack-manager:server-properties:{$record->id}", $properties, now()->addHours(2));
+            $record->appendLog('  Saved server.properties for safe settings merge.');
+        } catch (Throwable) {
+            Cache::forget("modpack-manager:server-properties:{$record->id}");
+            $record->appendLog('  Skip (not found): server.properties');
+        }
 
         $record->update(['progress' => 8]);
         $record->markStepDone('save_config');
@@ -411,12 +482,20 @@ class ModpackInstallService
         //     NeoForge 1.21.1 manifest was detected as "neoforge 21.1.221" and stayed on the
         //     NeoForge egg. This runs BEFORE download, so the current pack's own files (extracted
         //     afterwards) are untouched. These are tiny metadata files, never user data.
-        foreach (['start.sh', 'run.sh', 'variables.txt', 'user_jvm_args.txt', 'manifest.json', 'modrinth.index.json'] as $file) {
+        foreach (['start.sh', 'startserver.sh', 'run.sh', 'start.bat', 'startserver.bat', 'run.bat', 'start.ps1', 'startserver.ps1', 'run.ps1', 'variables.txt', 'user_jvm_args.txt', 'manifest.json', 'modrinth.index.json', 'unix_args.txt', 'server.jar', 'fabric-server-launch.jar', 'fabric-server-launcher.jar', 'quilt-server-launch.jar', 'installer.jar'] as $file) {
             try {
                 $this->fileRepo->deleteFiles('/', [$file]);
                 $record->appendLog("  Cleared stale launcher/metadata file: /{$file}");
             } catch (Throwable) {
                 // Usually absent; ignore.
+            }
+        }
+
+        foreach (['libraries', 'versions', '.fabric', '.fabric-installer', '.quilt', '.quilt-installer'] as $dir) {
+            try {
+                $this->fileRepo->deleteFiles('/', [$dir]);
+                $record->appendLog("  Cleared stale loader runtime: /{$dir}/");
+            } catch (Throwable) {
             }
         }
 
@@ -447,19 +526,71 @@ class ModpackInstallService
             return;
         }
 
-        $record->appendLog('Removing old mod/pack directories…');
-        foreach (['mods', 'config', 'scripts', 'kubejs', 'defaultconfigs', 'patchouli_books', 'resourcepacks', 'shaderpacks', 'datapacks'] as $dir) {
-            try {
-                $this->fileRepo->deleteFiles('/', [$dir]);
-                $record->appendLog("  Deleted: /{$dir}/");
-            } catch (Throwable) {
-                // Most won't exist; ignore.
-            }
-        }
+        $record->appendLog('Clean install enabled — removing files from the previous server pack…');
+        $this->cleanExistingServerRoot($record, $options);
 
         $record->update(['progress' => 24]);
         $record->markStepDone('delete_files');
         $record->appendLog('Old files removed.');
+    }
+
+    private function cleanExistingServerRoot(ModpackInstall $record, array $options): void
+    {
+        $keep = [];
+
+        if (!($options['delete_world'] ?? false)) {
+            $oldProperties = Cache::get("modpack-manager:server-properties:{$record->id}");
+            if (is_string($oldProperties)) {
+                $values = $this->parseServerProperties($oldProperties);
+                $levelName = trim((string) ($values['level-name'] ?? ''));
+                if (
+                    $levelName !== ''
+                    && $levelName !== '.'
+                    && $levelName !== '..'
+                    && !str_contains($levelName, '/')
+                    && !str_contains($levelName, '\\')
+                ) {
+                    foreach ([$levelName, $levelName . '_nether', $levelName . '_the_end'] as $worldName) {
+                        $keep[$worldName] = true;
+                    }
+                }
+            }
+        }
+
+        $entries = $this->fileRepo->getDirectory('/');
+
+        // Never remove an unrelated world folder merely because the user selected a clean
+        // pack install. The dedicated Delete world option handles the active world only.
+        foreach ($entries as $entry) {
+            $name = (string) ($entry['name'] ?? '');
+            if ($name === '' || $name === '.' || $name === '..' || !(bool) ($entry['directory'] ?? false)) {
+                continue;
+            }
+
+            if ($this->remotePathExists('/' . $name . '/level.dat')) {
+                $keep[$name] = true;
+            }
+        }
+
+        $deleted = 0;
+        foreach ($entries as $entry) {
+            $name = (string) ($entry['name'] ?? '');
+            if ($name === '' || $name === '.' || $name === '..' || isset($keep[$name])) {
+                continue;
+            }
+
+            try {
+                $this->fileRepo->deleteFiles('/', [$name]);
+                $deleted++;
+            } catch (Throwable $e) {
+                throw new RuntimeException("Could not remove stale server entry /{$name}: " . $e->getMessage(), 0, $e);
+            }
+        }
+
+        if ($keep) {
+            $record->appendLog('  Preserved world folder(s): ' . implode(', ', array_keys($keep)) . '.');
+        }
+        $record->appendLog("  Removed {$deleted} old root entr" . ($deleted === 1 ? 'y' : 'ies') . '.');
     }
 
     private function stepDownload(ModpackInstall $record, string $url): void
@@ -536,10 +667,10 @@ class ModpackInstallService
         $record->markStepDone('extract');
     }
 
-    private function stepRestoreConfig(ModpackInstall $record): void
+    private function stepRestoreConfig(ModpackInstall $record, array $options = []): void
     {
         $record->markStepRunning('restore_config');
-        $record->appendLog('Restoring preserved configuration files…');
+        $record->appendLog('Restoring preserved player/admin files…');
 
         $saved = Cache::get("modpack-manager:config:{$record->id}", []);
 
@@ -552,8 +683,96 @@ class ModpackInstallService
             }
         }
 
-        $record->update(['progress' => 62]);
+        $this->restoreSafeServerProperties($record, !($options['delete_world'] ?? false));
+
+        $record->update(['progress' => 96]);
         $record->markStepDone('restore_config');
+    }
+
+    private function restoreSafeServerProperties(ModpackInstall $record, bool $keepWorld): void
+    {
+        $old = Cache::get("modpack-manager:server-properties:{$record->id}");
+        if (!is_string($old) || $old === '') {
+            return;
+        }
+
+        try {
+            $current = (string) $this->fileRepo->getContent('/server.properties', 5 * 1024 * 1024);
+        } catch (Throwable) {
+            $current = '';
+        }
+
+        $oldValues = $this->parseServerProperties($old);
+        $merged = $current;
+        $applied = [];
+
+        foreach (config('modpack-manager.preserved_server_properties', []) as $key) {
+            $key = trim((string) $key);
+            if ($key === '' || !array_key_exists($key, $oldValues)) {
+                continue;
+            }
+
+            $merged = $this->setServerProperty($merged, $key, $oldValues[$key]);
+            $applied[] = $key;
+        }
+
+        // If the existing world is intentionally kept, keep its folder name too.
+        // World-generation settings such as level-type, generator-settings, seed,
+        // initial datapacks, etc. are intentionally NEVER copied from the old pack.
+        if ($keepWorld && isset($oldValues['level-name']) && trim((string) $oldValues['level-name']) !== '') {
+            $merged = $this->setServerProperty($merged, 'level-name', $oldValues['level-name']);
+            $applied[] = 'level-name';
+        }
+
+        if ($merged === '') {
+            return;
+        }
+
+        try {
+            $this->fileRepo->putContent('/server.properties', rtrim($merged, "\r\n") . "\n");
+            $record->appendLog(
+                $applied
+                    ? '  Merged safe server.properties settings: ' . implode(', ', $applied) . '. Pack world-generation settings were left untouched.'
+                    : '  Kept the new pack server.properties unchanged so its world-generation settings remain authoritative.'
+            );
+        } catch (Throwable $e) {
+            throw new RuntimeException('Could not write the final server.properties: ' . $e->getMessage(), 0, $e);
+        }
+    }
+
+    private function parseServerProperties(string $text): array
+    {
+        $values = [];
+        foreach (preg_split('/\r?\n/', $text) ?: [] as $line) {
+            $trimmed = trim($line);
+            if ($trimmed === '' || str_starts_with($trimmed, '#') || !str_contains($line, '=')) {
+                continue;
+            }
+
+            [$key, $value] = explode('=', $line, 2);
+            $key = trim($key);
+            if ($key !== '') {
+                $values[$key] = trim($value);
+            }
+        }
+
+        return $values;
+    }
+
+    private function setServerProperty(string $text, string $key, string $value): string
+    {
+        $line = $key . '=' . $value;
+        $pattern = '/^' . preg_quote($key, '/') . '=.*$/m';
+
+        if (preg_match($pattern, $text)) {
+            return (string) preg_replace_callback($pattern, fn () => $line, $text, 1);
+        }
+
+        if ($text !== '' && !str_ends_with($text, "\n")) {
+            $text .= "\n";
+        }
+
+        return $text . $line . "\n";
     }
 
     /**
@@ -597,13 +816,130 @@ class ModpackInstallService
             // Non-fatal.
         }
 
+        $this->normalizeUnusablePermissions($record);
         $this->writeInstalledMetadata($record);
 
         Cache::forget("modpack-manager:config:{$record->id}");
+        Cache::forget("modpack-manager:server-properties:{$record->id}");
 
         $record->update(['progress' => 98]);
         $record->markStepDone('finalize');
         $record->appendLog('Done.');
+    }
+
+    /**
+     * Some ZIPs carry Unix mode 000 entries. Wings can extract them successfully,
+     * but the game container cannot read those files afterwards. Repair only entries
+     * with no permission bits at all and leave every other mode unchanged.
+     */
+    private function normalizeUnusablePermissions(ModpackInstall $record): void
+    {
+        $filesFixed = 0;
+        $directoriesFixed = 0;
+
+        $this->normalizeUnusablePermissionsInDirectory('/', $filesFixed, $directoriesFixed);
+
+        if ($filesFixed > 0 || $directoriesFixed > 0) {
+            $record->appendLog(
+                "  Repaired unusable extracted permissions: {$filesFixed} file(s), {$directoriesFixed} "
+                . ($directoriesFixed === 1 ? 'directory' : 'directories')
+                . '.'
+            );
+        }
+    }
+
+    private function normalizeUnusablePermissionsInDirectory(
+        string $directory,
+        int &$filesFixed,
+        int &$directoriesFixed
+    ): void {
+        try {
+            $entries = $this->fileRepo->getDirectory($directory);
+        } catch (Throwable $e) {
+            throw new RuntimeException(
+                "Could not inspect extracted file permissions in {$directory}: " . $e->getMessage(),
+                0,
+                $e
+            );
+        }
+
+        $filesToFix = [];
+
+        foreach ($entries as $entry) {
+            $name = (string) ($entry['name'] ?? '');
+            if ($name === '' || $name === '.' || $name === '..' || (bool) ($entry['symlink'] ?? false)) {
+                continue;
+            }
+
+            $path = ($directory === '/' ? '' : rtrim($directory, '/')) . '/' . $name;
+            $relativePath = ltrim($path, '/');
+            $isDirectory = (bool) ($entry['directory'] ?? false);
+
+            if ($this->entryHasNoPermissions($entry)) {
+                if ($isDirectory) {
+                    try {
+                        $this->fileRepo->chmodFiles('/', [[
+                            'file' => $relativePath,
+                            'mode' => '0755',
+                        ]]);
+                    } catch (Throwable $e) {
+                        throw new RuntimeException(
+                            "Could not repair permissions on directory {$path}: " . $e->getMessage(),
+                            0,
+                            $e
+                        );
+                    }
+                    $directoriesFixed++;
+                } else {
+                    $filesToFix[] = [
+                        'file' => $relativePath,
+                        'mode' => '0644',
+                    ];
+                }
+            }
+
+            if ($isDirectory) {
+                $this->normalizeUnusablePermissionsInDirectory($path, $filesFixed, $directoriesFixed);
+            }
+
+            if (count($filesToFix) >= 200) {
+                $this->chmodPermissionBatch($filesToFix);
+                $filesFixed += count($filesToFix);
+                $filesToFix = [];
+            }
+        }
+
+        if ($filesToFix !== []) {
+            $this->chmodPermissionBatch($filesToFix);
+            $filesFixed += count($filesToFix);
+        }
+    }
+
+    private function entryHasNoPermissions(array $entry): bool
+    {
+        $modeBits = trim((string) ($entry['mode_bits'] ?? ''));
+        if ($modeBits !== '') {
+            return (bool) preg_match('/^0+$/', $modeBits);
+        }
+
+        $mode = trim((string) ($entry['mode'] ?? ''));
+        return $mode === '----------' || $mode === 'd---------';
+    }
+
+    /**
+     * @param array<int, array{file:string, mode:string}> $files
+     */
+    private function chmodPermissionBatch(array $files): void
+    {
+        try {
+            $this->fileRepo->chmodFiles('/', $files);
+        } catch (Throwable $e) {
+            throw new RuntimeException(
+                'Could not repair unusable extracted file permissions: ' . $e->getMessage(),
+                0,
+                $e
+            );
+        }
     }
 
     /**
@@ -640,14 +976,6 @@ class ModpackInstallService
     {
         $record->markStepRunning('configure_loader');
         $record->appendLog('Configuring startup / mod loader…');
-        $record->appendLog(sprintf(
-            '  [diag] mode=%s, CF-tagged loader=%s, mc=%s, version=%s',
-            $plan['mode'] ?? '?',
-            $plan['loader'] ?? '—',
-            $plan['mc'] ?? '—',
-            $plan['version'] ?? '—'
-        ));
-
         try {
             // Self-contained server packs (ServerPackCreator's start.sh, or a Forge/NeoForge
             // MDK run.sh) install AND launch their own loader. For those we just point the
@@ -670,12 +998,20 @@ class ModpackInstallService
                 //    neoforge/forge installer jar, no run-ready launcher). The exact loader
                 //    version is in the installer jar's filename — feed it to the egg path so
                 //    the matching egg installs precisely that version on top of the mods.
-                $installer = $this->detectInstallerJarMeta($record, $plan['loader'] ?? null);
-                if ($installer) {
-                    $plan['loader']  = $installer['loader'];
-                    $plan['version'] = $installer['version'] ?? ($plan['version'] ?? null);
-                    $plan['mc']      = $plan['mc'] ?: ($installer['mc'] ?? null);
-                    $record->appendLog("  Installer-based server pack — will install {$installer['loader']} {$installer['version']} via the matching egg.");
+                $launcherMeta = $this->detectServerPackLauncherMeta($record);
+                if ($launcherMeta) {
+                    $plan['loader'] = $launcherMeta['loader'];
+                    $plan['version'] = $launcherMeta['version'] ?? ($plan['version'] ?? null);
+                    $plan['mc'] = $launcherMeta['mc'] ?? ($plan['mc'] ?? null);
+                    $record->appendLog("  Pack launcher requires {$launcherMeta['loader']} {$launcherMeta['version']}" . ($launcherMeta['mc'] ? " / MC {$launcherMeta['mc']}" : '') . ' — installing that exact runtime via the matching egg.');
+                } else {
+                    $installer = $this->detectInstallerJarMeta($record, $plan['loader'] ?? null);
+                    if ($installer) {
+                        $plan['loader']  = $installer['loader'];
+                        $plan['version'] = $installer['version'] ?? ($plan['version'] ?? null);
+                        $plan['mc']      = $plan['mc'] ?: ($installer['mc'] ?? null);
+                        $record->appendLog("  Installer-based server pack — will install {$installer['loader']} {$installer['version']} via the matching egg.");
+                    }
                 }
             }
 
@@ -683,7 +1019,8 @@ class ModpackInstallService
             // so switch to a matching loader egg and reinstall to install the loader server.
             $this->configureLoaderEggAndReinstall($record, $plan);
         } catch (Throwable $e) {
-            $record->appendLog('  WARNING: startup/loader configuration skipped (' . $e->getMessage() . ').');
+            $record->markStepFailed('configure_loader');
+            throw new RuntimeException('Startup/loader configuration failed: ' . $e->getMessage(), 0, $e);
         }
 
         $record->markStepDone('configure_loader');
@@ -706,7 +1043,6 @@ class ModpackInstallService
      */
     private function configureSelfContainedPack(ModpackInstall $record, array $plan = []): bool
     {
-        // Index the server root (case-insensitively).
         $root = [];
         try {
             foreach ($this->fileRepo->getDirectory('/') as $e) {
@@ -717,79 +1053,98 @@ class ModpackInstallService
         }
 
         $hasSpc = isset($root['start.sh']) && isset($root['variables.txt']);
-        $hasRun = isset($root['run.sh']);
+        $candidates = [];
+        if (isset($root['startserver.sh'])) {
+            $candidates[] = 'startserver.sh';
+        }
+        if (isset($root['run.sh'])) {
+            $candidates[] = 'run.sh';
+        }
 
-        if (!$hasSpc && !$hasRun) {
+        if (!$hasSpc && !$candidates) {
             return false;
         }
 
         $server = $record->server->refresh();
-
         $loader = $mc = $loaderVer = null;
-        $java   = null;
+        $java = null;
         $startup = null;
+        $launcher = null;
+        $launcherMeta = null;
 
         if ($hasSpc) {
-            // variables.txt is the authoritative config for a ServerPackCreator pack.
-            $vars      = $this->parseVarsTxt((string) $this->fileRepo->getContent('/variables.txt', 1024 * 1024));
-            $mc        = $vars['MINECRAFT_VERSION'] ?? null;
-            $loader    = isset($vars['MODLOADER']) ? strtolower($vars['MODLOADER']) : null;
+            $vars = $this->parseVarsTxt((string) $this->fileRepo->getContent('/variables.txt', 1024 * 1024));
+            $mc = $vars['MINECRAFT_VERSION'] ?? null;
+            $loader = isset($vars['MODLOADER']) ? strtolower($vars['MODLOADER']) : null;
             $loaderVer = $vars['MODLOADER_VERSION'] ?? null;
-            $java      = isset($vars['RECOMMENDED_JAVA_VERSION']) && is_numeric($vars['RECOMMENDED_JAVA_VERSION'])
+            $java = isset($vars['RECOMMENDED_JAVA_VERSION']) && is_numeric($vars['RECOMMENDED_JAVA_VERSION'])
                 ? (int) $vars['RECOMMENDED_JAVA_VERSION']
                 : null;
-            $startup   = 'bash start.sh';
-        } else {
-            // Plain Forge/NeoForge MDK server pack with a run.sh launcher.
-            ['loader' => $loader, 'version' => $loaderVer, 'mc' => $mc] =
-                $this->parseRunSh((string) $this->fileRepo->getContent('/run.sh', 256 * 1024));
-            $startup = 'bash run.sh nogui';
-        }
-
-        // The on-disk launcher is authoritative: stepDeleteFiles() always clears any
-        // start.sh/run.sh/variables.txt a *previous* install left BEFORE this pack is
-        // downloaded, so whatever launcher is here now was extracted from THIS pack's archive
-        // and describes its own loader. The CurseForge `gameVersions` tag carried on the plan
-        // is the weaker signal — for Minecraft 1.20.1 (the one version where Forge and NeoForge
-        // coexist) packs are routinely tagged "NeoForge" (or both) even when they're Forge, and
-        // vice-versa. So when the two disagree we TRUST THE LAUNCHER rather than bail to the
-        // egg-switch path (which, having no manifest for a server pack, would blindly follow the
-        // mistagged CF loader and land a Forge pack on the NeoForge egg — the exact bug).
-        $planLoader = $this->normalizeLoader($plan['loader'] ?? null);
-        $diskLoader = $this->normalizeLoader($loader);
-        if ($planLoader && $diskLoader && $planLoader !== $diskLoader) {
-            $record->appendLog("  Note: CurseForge tags this pack “{$planLoader}”, but its own launcher is “{$diskLoader}” — trusting the launcher (the CF loader tag is unreliable for 1.20.1 Forge/NeoForge).");
-        }
-
-        if ($hasSpc) {
+            $startup = 'bash start.sh';
+            $launcher = 'start.sh';
             $record->appendLog('  ServerPackCreator pack detected — launching via start.sh.');
             $this->applyServerPackCreatorTweaks($record, $this->normalizeLoader($loader) ?? '');
         } else {
-            $record->appendLog('  Self-contained server pack detected — launching via run.sh' . ($loader ? " ({$loader})" : '') . '.');
-            $this->writeUserJvmArgs($record);
-        }
+            foreach ($candidates as $candidate) {
+                try {
+                    $launcherText = (string) $this->fileRepo->getContent('/' . $candidate, 512 * 1024);
+                } catch (Throwable) {
+                    continue;
+                }
 
-        // Fall back to the loader/MC carried on the plan (CurseForge file metadata) if the
-        // launcher script didn't reveal them — guarantees the egg can still be switched.
-        $loader    = $loader    ?: ($plan['loader']  ?? null);
-        $mc        = $mc        ?: ($plan['mc']       ?? null);
-        $loaderVer = $loaderVer ?: ($plan['version']  ?? null);
+                $meta = $this->parseLauncherSh($launcherText);
+                $ready = !empty($meta['target']) && $this->remotePathExists((string) $meta['target']);
+                $selfInstalling = $this->launcherCanInstallLoader($launcherText);
 
-        // Switch the server to the matching loader egg (correct egg + Java image list in the
-        // panel) — but do NOT reinstall, so the bundled loader/files survive.
-        $loaderKey = $this->normalizeLoader($loader);
-        if ($loaderKey) {
-            try {
-                $this->switchToLoaderEgg($record, $server, $loaderKey, $mc, $loaderVer);
-                $server = $server->refresh();
-            } catch (Throwable $e) {
-                $record->appendLog('  WARNING: could not switch egg (' . $e->getMessage() . '). Leaving the current egg.');
+                if (!$meta['loader'] || (!$ready && !$selfInstalling)) {
+                    continue;
+                }
+
+                $launcher = $candidate;
+                $launcherMeta = $meta;
+                $loader = $meta['loader'];
+                $loaderVer = $meta['version'];
+                $mc = $meta['mc'];
+                $startup = $candidate === 'run.sh'
+                    ? 'bash run.sh nogui'
+                    : ($this->launcherAcceptsArguments($launcherText) ? 'bash startserver.sh nogui' : 'bash startserver.sh');
+
+                $runtime = $ready ? 'existing runtime verified' : 'launcher installs its runtime on first start';
+                $record->appendLog("  Self-contained {$candidate} detected — {$runtime}.");
+                break;
+            }
+
+            if (!$launcher) {
+                return false;
+            }
+
+            if (in_array($this->normalizeLoader($loader), ['forge', 'neoforge'], true)) {
+                $this->writeUserJvmArgs($record);
             }
         }
 
-        // Pick the Java image from the (now matching) egg's allowed images, then write the
-        // bundled-launcher startup + image directly, overriding any egg defaults. No reinstall.
-        $java  = $java ?: $this->javaForMc($mc);
+        $loader = $loader ?: ($plan['loader'] ?? null);
+        $mc = $mc ?: ($plan['mc'] ?? null);
+        $loaderVer = $loaderVer ?: ($plan['version'] ?? null);
+
+        $planLoader = $this->normalizeLoader($plan['loader'] ?? null);
+        $diskLoader = $this->normalizeLoader($loader);
+        if ($planLoader && $diskLoader && $planLoader !== $diskLoader) {
+            $record->appendLog("  Pack metadata says “{$planLoader}”, but its launcher says “{$diskLoader}” — using the launcher.");
+        }
+
+        if (!$diskLoader) {
+            $record->appendLog('  Bundled launcher found, but its loader could not be identified.');
+            return false;
+        }
+
+        $egg = $this->switchToLoaderEgg($record, $server, $diskLoader, $mc, $loaderVer);
+        if (!$egg) {
+            throw new RuntimeException("No {$diskLoader} egg could be selected for this pack.");
+        }
+        $server = $server->refresh();
+
+        $java = $java ?: $this->javaForMc($mc);
         $image = $this->pickJavaImageForVersion($server, $java);
 
         $update = ['startup' => $startup];
@@ -797,84 +1152,143 @@ class ModpackInstallService
             $update['image'] = $image;
         }
         $server->update($update);
+        $server = $server->refresh();
 
-        $detail = trim(($loaderKey ?: ($loader ?: 'unknown loader')) . ' ' . ($loaderVer ?? '') . ($mc ? " / MC {$mc}" : ''));
-        $record->appendLog("  Startup set to “{$startup}”" . ($image ? " (image {$image}, Java {$java})" : '') . " — {$detail}.");
-        $record->appendLog('  No reinstall — the pack installs/launches its own loader. Stop → Start once so the new Java image is applied.');
+        if (!$this->remotePathExists('/' . $launcher)) {
+            throw new RuntimeException("Configured launcher {$launcher} disappeared before startup was saved.");
+        }
+
+        if ($launcherMeta && !empty($launcherMeta['target'])) {
+            try {
+                $launcherText = (string) $this->fileRepo->getContent('/' . $launcher, 512 * 1024);
+                if (!$this->remotePathExists((string) $launcherMeta['target']) && !$this->launcherCanInstallLoader($launcherText)) {
+                    throw new RuntimeException("{$launcher} points to missing runtime {$launcherMeta['target']}.");
+                }
+            } catch (RuntimeException $e) {
+                throw $e;
+            } catch (Throwable $e) {
+                throw new RuntimeException("Could not verify {$launcher}: " . $e->getMessage(), 0, $e);
+            }
+        }
+
+        $detail = trim($diskLoader . ' ' . ($loaderVer ?? '') . ($mc ? " / MC {$mc}" : ''));
+        $record->appendLog("  Egg: {$egg->name}; startup: {$startup}; Java {$java}; {$detail}.");
+        $record->appendLog('  Startup preflight passed. The server should be ready to start without a manual loader change.');
 
         return true;
     }
 
-    /**
-     * Switch the server to a Forge/NeoForge/Fabric egg matching the detected loader, set its
-     * MC + loader-version variables, and trigger a reinstall. Used only when WE assembled the
-     * files (curseforge_build / modrinth) and there is no bundled launcher script.
-     */
     private function configureLoaderEggAndReinstall(ModpackInstall $record, array $plan): void
     {
         ['loader' => $loader, 'mc' => $mc, 'version' => $ver] = $this->detectLoader($record, $plan);
 
         if (!$loader) {
-            $record->appendLog('  Could not determine the mod loader (no manifest/index and no launcher). Egg left unchanged.');
-            return;
+            throw new RuntimeException('Could not determine the mod loader from the pack metadata or files.');
         }
 
         $record->appendLog("  Detected loader: {$loader}" . ($ver ? " {$ver}" : '') . ($mc ? " (Minecraft {$mc})" : ''));
 
         $loaderKey = $this->normalizeLoader($loader);
-        if (!$loaderKey || $loaderKey === 'quilt') {
-            $record->appendLog('  No matching egg for this loader on the panel — set your loader manually.');
-            return;
+        if (!$loaderKey) {
+            throw new RuntimeException("No automatic Pelican egg mapping is available for loader {$loader}.");
         }
 
         $server = $record->server->refresh();
-        $egg    = $this->switchToLoaderEgg($record, $server, $loaderKey, $mc, $ver);
+        $egg = $this->switchToLoaderEgg($record, $server, $loaderKey, $mc, $ver);
         if (!$egg) {
-            return;
+            throw new RuntimeException("No usable official Pelican {$loaderKey} egg is available.");
         }
 
         $server = $server->refresh();
-        // FTB/ATLauncher report an exact Java version; otherwise infer from the MC version.
-        $java   = $plan['java'] ?? $this->javaForMc($mc);
-        $image  = $this->pickJavaImageForVersion($server, $java);
+        if ((bool) $server->skip_scripts) {
+            $server->forceFill(['skip_scripts' => false])->saveOrFail();
+            $server = $server->refresh();
+            $record->appendLog('  Enabled egg installation scripts for the loader reinstall.');
+        }
+
+        $java = $plan['java'] ?? $this->javaForMc($mc);
+        $image = $this->pickJavaImageForVersion($server, $java);
+        $commands = array_values((array) ($egg->startup_commands ?? []));
+        $defaultStartup = $commands[0] ?? null;
+        if ((int) $server->memory === 0 && is_string($defaultStartup) && str_contains($defaultStartup, '-Xmx{{SERVER_MEMORY}}M')) {
+            $defaultStartup = str_replace('-Xmx{{SERVER_MEMORY}}M', '-XX:MaxRAMPercentage=92.5', $defaultStartup);
+            $record->appendLog('  Unlimited server memory detected — replaced -Xmx0M-prone startup with container-aware MaxRAMPercentage.');
+        }
+
+        $update = [];
         if ($image) {
-            $server->update(['image' => $image]);
+            $update['image'] = $image;
+        }
+        if ($defaultStartup) {
+            $update['startup'] = $defaultStartup;
+        }
+        if ($update) {
+            $server->update($update);
+            $server = $server->refresh();
+        }
+
+        if ($image) {
             $record->appendLog("  Set Java image: {$image} (Java {$java}).");
+        }
+        if ($defaultStartup) {
+            $record->appendLog('  Reset startup to the selected egg default before reinstall.');
         }
 
         try {
-            app(ReinstallServerService::class)->handle($server->refresh());
-            $record->appendLog("  Triggered a server reinstall — the egg is installing the {$loaderKey} server now. Watch the console.");
+            $server = app(ReinstallServerService::class)->handle($server->refresh());
+            $record->appendLog("  Triggered {$loaderKey} egg reinstall; waiting for the loader runtime to finish installing…");
+
+            $deadline = time() + 900;
+            do {
+                sleep(5);
+                $server = $server->refresh();
+                $status = $server->status;
+                $statusValue = $status instanceof \BackedEnum ? $status->value : (string) $status;
+                if ($statusValue !== 'installing') {
+                    break;
+                }
+            } while (time() < $deadline);
+
+            $status = $server->status;
+            $statusValue = $status instanceof \BackedEnum ? $status->value : (string) $status;
+            if ($statusValue === 'installing') {
+                throw new RuntimeException('Pelican did not finish the loader reinstall within 15 minutes.');
+            }
+
+            $server = $server->refresh();
+            $this->fileRepo->setServer($server);
+            $this->verifyEggRuntime($record, $loaderKey, $mc);
+            $this->configurePostReinstallLauncher($record, $server, $loaderKey);
+            $record->appendLog("  {$egg->name} runtime verified; Java {$java}; server is ready to start.");
         } catch (Throwable $e) {
-            $record->appendLog('  WARNING: could not auto-trigger reinstall (' . $e->getMessage() . '). Reinstall the server manually to install the loader.');
+            throw new RuntimeException('Automatic loader installation failed: ' . $e->getMessage(), 0, $e);
         }
     }
 
-    /**
-     * Switch the server to the egg matching $loader and set its MC + loader-version variables.
-     * Does NOT reinstall. Returns the matched egg, or null if no matching egg is installed.
-     */
     private function switchToLoaderEgg(ModpackInstall $record, Server $server, string $loader, ?string $mc, ?string $ver): ?Egg
     {
-        // [diag] show every installed egg and how it scores for the target loader, so the log
-        // makes clear why a given egg was (or wasn't) picked.
-        try {
-            $scores = Egg::with('variables')->get()
-                ->map(fn ($e) => "{$e->name}={$this->loaderEggScore($e, $loader)}")
-                ->implode(', ');
-            $record->appendLog("  [diag] egg scores for “{$loader}”: {$scores}");
-        } catch (Throwable) {
-            // diagnostics only — never fail the install over this
+
+        // Prefer the canonical Pelican egg from pelican-eggs/minecraft. If it is not
+        // installed yet, fetch the current upstream export directly from GitHub and import it.
+        // This preserves Pelican's own name, icon, Docker images, settings, variables and update URL.
+        $egg = $this->findOfficialPelicanEgg($loader);
+        if (!$egg) {
+            $egg = $this->importOfficialPelicanEgg($record, $loader);
         }
 
-        $egg = $this->findLoaderEgg($loader);
-        if (!$egg) {
-            // No matching egg installed — try to import a bundled one (e.g. many panels
-            // ship Forge/Fabric but not NeoForge), then retry the match.
-            $egg = $this->importBundledLoaderEgg($record, $loader);
+        if ($loader === 'quilt' && $egg) {
+            // The upstream Quilt egg intentionally exposes MC_VERSION but not a Quilt Loader
+            // version. Keep the official egg itself and add only the optional exact-version
+            // hook required by modpacks that pin quilt-loader. The visible egg remains the
+            // canonical Pelican Quilt egg with its upstream icon/settings.
+            if (!$this->prepareOfficialQuiltEgg($record, $egg)) {
+                $record->appendLog('  Could not prepare the official Quilt egg for the requested loader version — refusing to create a separate custom Quilt egg.');
+                return null;
+            }
         }
+
         if (!$egg) {
-            $record->appendLog("  No {$loader} egg installed on this panel and none bundled — egg left unchanged. Install a {$loader} egg to enable auto-switching.");
+            $record->appendLog("  No canonical official Pelican {$loader} egg is available. Loader switching was stopped rather than using an unrelated/custom egg.");
             return null;
         }
 
@@ -934,7 +1348,7 @@ class ModpackInstallService
         // Write $val into the FIRST candidate (by the candidates' own priority order) that
         // the egg actually defines. Iterating candidates — NOT the egg's variable list — is
         // essential: the loader version must land in the RIGHT variable when an egg defines
-        // several of them. The bundled Fabric egg is the trap — it lists FABRIC_VERSION (the
+        // several of them. The official Fabric egg is the trap — it lists FABRIC_VERSION (the
         // *installer* version) BEFORE LOADER_VERSION (the loader), so matching by egg order
         // wrote the loader version into FABRIC_VERSION and the install script then fetched
         // fabric-installer/<loader>/… which 404s. Candidate priority fixes that.
@@ -959,22 +1373,24 @@ class ModpackInstallService
         $set(['MC_VERSION', 'MINECRAFT_VERSION'], $mc);
 
         if ($loader === 'fabric') {
-            // Fabric's loader is Minecraft-version-agnostic and backward-compatible, so
-            // pinning the pack's exact loader build buys nothing — and pinning is what caused
-            // the 404: the loader build (e.g. 0.19.3) was landing in FABRIC_VERSION, which the
-            // egg uses as the *installer* version, so it fetched a non-existent
-            // fabric-installer-0.19.3.jar. Force BOTH the loader and installer versions to
-            // "latest": the downloads are always valid, and writing every matching var (not
-            // just the first) also scrubs any stale/poisoned value a previous install left.
             foreach ($egg->variables as $v) {
-                if (in_array(strtoupper((string) $v->env_variable), ['LOADER_VERSION', 'FABRIC_VERSION'], true)) {
-                    ServerVariable::query()->updateOrCreate(
-                        ['server_id' => $server->id, 'variable_id' => $v->id],
-                        ['variable_value' => 'latest']
-                    );
-                    $applied[$v->env_variable] = 'latest';
+                $env = strtoupper((string) $v->env_variable);
+                if ($env === 'FABRIC_VERSION') {
+                    $value = 'latest';
+                } elseif ($env === 'LOADER_VERSION') {
+                    $value = $ver ?: 'latest';
+                } else {
+                    continue;
                 }
+
+                ServerVariable::query()->updateOrCreate(
+                    ['server_id' => $server->id, 'variable_id' => $v->id],
+                    ['variable_value' => $value]
+                );
+                $applied[$v->env_variable] = $value;
             }
+        } elseif ($loader === 'quilt') {
+            $set(['QUILT_LOADER_VERSION', 'LOADER_VERSION'], $ver ?: 'latest');
         } else {
             // The Forge egg wants the FULL Maven version in FORGE_VERSION — it downloads
             // .../forge/${FORGE_VERSION}/forge-${FORGE_VERSION}-installer.jar, and Forge's artifact
@@ -1023,7 +1439,7 @@ class ModpackInstallService
      * @param array<int, string> $gameVersions
      * @return array{loader:?string, mc:?string}
      */
-    private function cfLoaderMeta(array $gameVersions): array
+    private function cfLoaderMeta(array $gameVersions, ?string $preferredLoader = null): array
     {
         $loader = $mc = null;
         $found  = [];
@@ -1037,10 +1453,15 @@ class ModpackInstallService
             }
         }
 
-        foreach (['neoforge', 'forge', 'fabric', 'quilt'] as $candidate) {
-            if (!empty($found[$candidate])) {
-                $loader = $candidate;
-                break;
+        $preferred = $this->normalizeLoader($preferredLoader);
+        if ($preferred && !empty($found[$preferred])) {
+            $loader = $preferred;
+        } else {
+            foreach (['neoforge', 'forge', 'quilt', 'fabric'] as $candidate) {
+                if (!empty($found[$candidate])) {
+                    $loader = $candidate;
+                    break;
+                }
             }
         }
 
@@ -1116,25 +1537,238 @@ class ModpackInstallService
      *
      * @return array{loader:?string, version:?string, mc:?string}
      */
-    private function parseRunSh(string $txt): array
+    private function detectServerPackLauncherMeta(ModpackInstall $record): ?array
     {
-        if (preg_match('#libraries/net/neoforged/neoforge/([^/\s]+)/#', $txt, $m)) {
-            return ['loader' => 'neoforge', 'version' => $m[1], 'mc' => $this->mcFromNeoforge($m[1])];
+        foreach (['startserver.sh', 'run.sh'] as $launcher) {
+            if (!$this->remotePathExists('/' . $launcher)) {
+                continue;
+            }
+
+            try {
+                $text = (string) $this->fileRepo->getContent('/' . $launcher, 512 * 1024);
+                $meta = $this->parseLauncherSh($text);
+            } catch (Throwable) {
+                continue;
+            }
+
+            if (!empty($meta['loader'])) {
+                $record->appendLog("  Found {$launcher} metadata: {$meta['loader']}" . (!empty($meta['version']) ? " {$meta['version']}" : '') . (!empty($meta['mc']) ? " / MC {$meta['mc']}" : '') . '.');
+                $meta['launcher'] = $launcher;
+                return $meta;
+            }
         }
-        if (preg_match('#libraries/net/minecraftforge/forge/([0-9.]+)-([0-9.]+)#', $txt, $m)) {
-            return ['loader' => 'forge', 'version' => $m[2], 'mc' => $m[1]];
-        }
-        return ['loader' => null, 'version' => null, 'mc' => null];
+
+        return null;
     }
 
-    /**
-     * Detect an installer-based server pack by the loader installer jar it ships in the root,
-     * e.g. AllTheMods packs bundle `neoforge-21.1.228-installer.jar` (+ a startserver.sh that
-     * runs it) or `forge-1.20.1-47.4.20-installer.jar`. The exact loader version lives in the
-     * filename, which is what we want to hand the matching egg.
-     *
-     * @return array{loader:string, version:?string, mc:?string}|null
-     */
+    private function configurePostReinstallLauncher(ModpackInstall $record, Server $server, string $loader): void
+    {
+        foreach (['startserver.sh', 'run.sh'] as $launcher) {
+            if (!$this->remotePathExists('/' . $launcher)) {
+                continue;
+            }
+
+            try {
+                $text = (string) $this->fileRepo->getContent('/' . $launcher, 512 * 1024);
+                $meta = $this->parseLauncherSh($text);
+            } catch (Throwable) {
+                continue;
+            }
+
+            if ($this->normalizeLoader($meta['loader'] ?? null) !== $loader) {
+                continue;
+            }
+            if (empty($meta['target']) || !$this->remotePathExists((string) $meta['target'])) {
+                continue;
+            }
+
+            $startup = $launcher === 'run.sh'
+                ? 'bash run.sh nogui'
+                : ($this->launcherAcceptsArguments($text) ? 'bash startserver.sh nogui' : 'bash startserver.sh');
+
+            $server->update(['startup' => $startup]);
+            $record->appendLog("  Pack launcher verified after reinstall; startup set to “{$startup}”.");
+            return;
+        }
+
+        $record->appendLog('  No verified bundled launcher after reinstall — keeping the egg default startup.');
+    }
+
+    private function parseLauncherSh(string $txt): array
+    {
+
+        if (preg_match('#libraries/net/neoforged/neoforge/([0-9][0-9.]*)/unix_args\.txt#', $txt, $m)) {
+            return [
+                'loader' => 'neoforge',
+                'version' => $m[1],
+                'mc' => $this->mcFromNeoforge($m[1]),
+                'target' => '/libraries/net/neoforged/neoforge/' . $m[1] . '/unix_args.txt',
+            ];
+        }
+
+        if (preg_match('#libraries/net/neoforged/forge/([0-9]+\.[0-9]+(?:\.[0-9]+)?)-([0-9][0-9.]*)/unix_args\.txt#', $txt, $m)) {
+            $fullVersion = $m[1] . '-' . $m[2];
+            return [
+                'loader' => 'neoforge',
+                'version' => $fullVersion,
+                'mc' => $m[1],
+                'target' => '/libraries/net/neoforged/forge/' . $fullVersion . '/unix_args.txt',
+            ];
+        }
+
+        if (preg_match('#libraries/net/minecraftforge/forge/([0-9]+\.[0-9]+(?:\.[0-9]+)?)-([0-9][0-9.]*)/unix_args\.txt#', $txt, $m)) {
+            return [
+                'loader' => 'forge',
+                'version' => $m[2],
+                'mc' => $m[1],
+                'target' => '/libraries/net/minecraftforge/forge/' . $m[1] . '-' . $m[2] . '/unix_args.txt',
+            ];
+        }
+
+        if (preg_match('/^\s*NEOFORGE_VERSION\s*=\s*["\']?([0-9][0-9.]*)["\']?\s*$/mi', $txt, $m)) {
+            $version = $m[1];
+            return [
+                'loader' => 'neoforge',
+                'version' => $version,
+                'mc' => $this->mcFromNeoforge($version),
+                'target' => '/libraries/net/neoforged/neoforge/' . $version . '/unix_args.txt',
+            ];
+        }
+
+        $mc = null;
+        if (preg_match('/^\s*(?:MINECRAFT_VERSION|MC_VERSION)\s*=\s*["\']?([0-9]+\.[0-9]+(?:\.[0-9]+)?)["\']?\s*$/mi', $txt, $m)) {
+            $mc = $m[1];
+        }
+
+        if (preg_match('/^\s*FORGE_VERSION\s*=\s*["\']?([0-9]+\.[0-9]+(?:\.[0-9]+)?)-([0-9][0-9.]*)["\']?\s*$/mi', $txt, $m)) {
+            return [
+                'loader' => 'forge',
+                'version' => $m[2],
+                'mc' => $m[1],
+                'target' => '/libraries/net/minecraftforge/forge/' . $m[1] . '-' . $m[2] . '/unix_args.txt',
+            ];
+        }
+
+        if ($mc && preg_match('/^\s*FORGE_VERSION\s*=\s*["\']?([0-9][0-9.]*)["\']?\s*$/mi', $txt, $m)) {
+            return [
+                'loader' => 'forge',
+                'version' => $m[1],
+                'mc' => $mc,
+                'target' => '/libraries/net/minecraftforge/forge/' . $mc . '-' . $m[1] . '/unix_args.txt',
+            ];
+        }
+
+        if (stripos($txt, 'fabric-server-launch') !== false) {
+            $loaderVersion = null;
+            if (preg_match('/^\s*LOADER_VERSION\s*=\s*["\']?([^\s"\']+)["\']?\s*$/mi', $txt, $m)) {
+                $loaderVersion = $m[1];
+            }
+            $jar = str_contains($txt, 'fabric-server-launcher.jar') ? 'fabric-server-launcher.jar' : 'fabric-server-launch.jar';
+            return [
+                'loader' => 'fabric',
+                'version' => $loaderVersion,
+                'mc' => $mc,
+                'target' => '/' . $jar,
+            ];
+        }
+
+        if (stripos($txt, 'quilt-server-launch') !== false) {
+            $loaderVersion = null;
+            if (preg_match('/^\s*(?:QUILT_LOADER_VERSION|LOADER_VERSION)\s*=\s*["\']?([^\s"\']+)["\']?\s*$/mi', $txt, $m)) {
+                $loaderVersion = $m[1];
+            }
+            $jar = str_contains($txt, 'quilt-server-launcher.jar') ? 'quilt-server-launcher.jar' : 'quilt-server-launch.jar';
+            return [
+                'loader' => 'quilt',
+                'version' => $loaderVersion,
+                'mc' => $mc,
+                'target' => '/' . $jar,
+            ];
+        }
+
+        return ['loader' => null, 'version' => null, 'mc' => $mc, 'target' => null];
+    }
+
+    private function parseRunSh(string $txt): array
+    {
+        $meta = $this->parseLauncherSh($txt);
+        return [
+            'loader' => $meta['loader'],
+            'version' => $meta['version'],
+            'mc' => $meta['mc'],
+        ];
+    }
+
+    private function launcherCanInstallLoader(string $txt): bool
+    {
+        return (bool) preg_match(
+            '/(?:--installServer|-installServer|fabric-installer|quilt-installer|server\.jar\s+--installer|(?:neo)?forge[^\n]*installer\.jar)/i',
+            $txt
+        );
+    }
+
+    private function launcherAcceptsArguments(string $txt): bool
+    {
+        return str_contains($txt, '$@') || str_contains($txt, '$*');
+    }
+
+    private function remotePathExists(string $path): bool
+    {
+        $path = '/' . ltrim($path, '/');
+        $dir = dirname($path);
+        $name = basename($path);
+        if ($name === '' || $name === '.' || $name === '..') {
+            return false;
+        }
+
+        try {
+            foreach ($this->fileRepo->getDirectory($dir === '.' ? '/' : $dir) as $entry) {
+                if (($entry['name'] ?? null) === $name) {
+                    return true;
+                }
+            }
+        } catch (Throwable) {
+        }
+
+        return false;
+    }
+
+    private function verifyEggRuntime(ModpackInstall $record, string $loader, ?string $mc): void
+    {
+        if ($loader === 'fabric') {
+            if (!$this->remotePathExists('/server.jar')) {
+                throw new RuntimeException('Fabric egg reinstall finished, but server.jar was not created.');
+            }
+            $record->appendLog('  Preflight: Fabric launcher server.jar found.');
+            return;
+        }
+
+        if ($loader === 'quilt') {
+            if (!$this->remotePathExists('/server.jar')) {
+                throw new RuntimeException('Quilt egg reinstall finished, but server.jar was not created.');
+            }
+            if (!$this->remotePathExists('/quilt-server-launcher.properties')) {
+                throw new RuntimeException('Quilt egg reinstall finished, but quilt-server-launcher.properties was not created.');
+            }
+            $record->appendLog('  Preflight: Quilt launcher server.jar and launcher properties found.');
+            return;
+        }
+
+        if ($loader === 'forge' && $mc && version_compare($mc, '1.17', '<')) {
+            if (!$this->remotePathExists('/server.jar')) {
+                throw new RuntimeException('Forge egg reinstall finished, but server.jar was not created.');
+            }
+            $record->appendLog('  Preflight: legacy Forge server.jar found.');
+            return;
+        }
+
+        if (!$this->remotePathExists('/unix_args.txt')) {
+            throw new RuntimeException("{$loader} egg reinstall finished, but unix_args.txt was not created.");
+        }
+
+        $record->appendLog("  Preflight: {$loader} unix_args.txt found.");
+    }
+
     private function detectInstallerJarMeta(ModpackInstall $record, ?string $preferLoader = null): ?array
     {
         try {
@@ -1183,7 +1817,7 @@ class ModpackInstallService
 
     /**
      * Pick a Java docker image for a specific major version, preferring one the server's
-     * current egg already allows, else falling back to the parkervcp yolks image.
+     * current egg already allows, else falling back to Pelican's yolks image.
      */
     private function pickJavaImageForVersion(Server $server, int $java): ?string
     {
@@ -1200,7 +1834,7 @@ class ModpackInstallService
             // fall through to the default image
         }
 
-        return "ghcr.io/parkervcp/yolks:java_{$java}";
+        return "ghcr.io/pelican-eggs/yolks:java_{$java}";
     }
 
     /**
@@ -1263,87 +1897,152 @@ class ModpackInstallService
     }
 
     /**
-     * Find an installed egg matching the loader, identified by its variable names
-     * (robust across differently-named eggs / panels).
+     * The official Quilt egg exposes MC_VERSION but not an exact Quilt Loader variable.
+     * Add that optional variable to the same official egg and teach its install script to
+     * honor it without creating a second/custom egg.
      */
-    private function findLoaderEgg(string $loader): ?Egg
+    private function prepareOfficialQuiltEgg(ModpackInstall $record, Egg $egg): bool
     {
-        $best      = null;
-        $bestScore = 0;
-
-        // Pick the *best*-scoring egg rather than the first match, so a generic Forge
-        // egg listed before the NeoForge egg can't win a neoforge lookup.
-        foreach (Egg::with('variables')->get() as $egg) {
-            $score = $this->loaderEggScore($egg, $loader);
-            if ($score > $bestScore) {
-                $bestScore = $score;
-                $best      = $egg;
-            }
+        if (strtolower(trim((string) $egg->name)) !== 'quilt') {
+            return false;
         }
 
-        return $bestScore > 0 ? $best : null;
+        try {
+            $script = str_replace("\r\n", "\n", (string) $egg->script_install);
+
+            if (!str_contains($script, 'QUILT_LOADER_VERSION')) {
+                $replacement = <<<'SCRIPT'
+if [ -n "${QUILT_LOADER_VERSION:-}" ] && [ "${QUILT_LOADER_VERSION}" != "latest" ]; then
+  java -jar quilt.jar install server "${MC_VERSION}" "${QUILT_LOADER_VERSION}" --download-server
+else
+  java -jar quilt.jar install server "${MC_VERSION}" --download-server
+fi
+SCRIPT;
+
+                $multiline = "java -jar quilt.jar \\\n  install server \$MC_VERSION \\\n  --download-server";
+                $singleLine = 'java -jar quilt.jar install server $MC_VERSION --download-server';
+
+                if (str_contains($script, $multiline)) {
+                    $script = str_replace($multiline, $replacement, $script, $count);
+                } elseif (str_contains($script, $singleLine)) {
+                    $script = str_replace($singleLine, $replacement, $script, $count);
+                } else {
+                    throw new RuntimeException('The official Quilt egg uses an unrecognized install script.');
+                }
+
+                if (($count ?? 0) !== 1) {
+                    throw new RuntimeException('Could not safely add exact Quilt Loader support to the official egg.');
+                }
+
+                $egg->script_install = $script;
+                $egg->saveOrFail();
+            }
+
+            EggVariable::query()->firstOrCreate(
+                [
+                    'egg_id' => $egg->id,
+                    'env_variable' => 'QUILT_LOADER_VERSION',
+                ],
+                [
+                    'name' => 'Quilt Loader Version',
+                    'description' => 'Exact Quilt Loader version required by the selected modpack.',
+                    'default_value' => 'latest',
+                    'user_viewable' => true,
+                    'user_editable' => true,
+                    'rules' => ['required', 'string', 'max:32'],
+                    'sort' => ((int) $egg->variables()->max('sort')) + 1,
+                ]
+            );
+
+            $egg->load('variables');
+            $record->appendLog('  Using the official “Quilt” egg with exact Quilt Loader support enabled.');
+
+            return true;
+        } catch (Throwable $e) {
+            $record->appendLog('  WARNING: could not prepare the official Quilt egg (' . $e->getMessage() . ').');
+            return false;
+        }
     }
 
     /**
-     * Score how well an egg matches a loader. A defining variable is the strongest
-     * signal (3); the egg name is a fallback (2) for eggs that name their version
-     * variable unconventionally. 0 means "not this loader" — crucially a Forge egg
-     * never scores for neoforge (and vice-versa), so a neoforge pack can never fall
-     * back onto the Forge egg.
+     * Canonical Pelican-native Minecraft loader eggs. These are the same exports offered by
+     * pelican-eggs/minecraft, not plugin-maintained copies.
+     *
+     * @return array{url:string,format:EggFormat,uuid:string,path:string}|null
      */
-    private function loaderEggScore(Egg $egg, string $loader): int
+    private function officialPelicanEggSource(string $loader): ?array
     {
-        $envs = $egg->variables->pluck('env_variable')->map(fn ($e) => strtoupper((string) $e))->all();
-        $has  = fn (string $n) => in_array($n, $envs, true);
-
-        $name      = strtolower((string) $egg->name);
-        $isNeoName = (bool) preg_match('/neo[\s_-]*forge/', $name);
-        $isNeoVar  = $has('NEOFORGE_VERSION');
-
-        // Match a loader keyword only as a WHOLE WORD, so an unrelated egg whose name merely
-        // contains the substring can't masquerade as a loader egg. The classic offender is
-        // "Arma Reforger" → "re·forge·r" contains "forge" but is not the Forge loader; a bare
-        // str_contains() let it score as a Forge fallback whenever no real Forge egg was
-        // installed. \bforge\b matches "Forge Minecraft" / "Minecraft Forge" but not "reforger".
-        $nameMentions = fn (string $kw) => (bool) preg_match('/\b' . preg_quote($kw, '/') . '\b/', $name);
-
         return match ($loader) {
-            'neoforge' => $isNeoVar ? 3 : ($isNeoName ? 2 : 0),
-            'forge'    => (!$isNeoVar && !$isNeoName && !$has('SPONGE_TYPE'))
-                ? ($has('FORGE_VERSION') ? 3 : ($nameMentions('forge') ? 2 : 0))
-                : 0,
-            'fabric'   => ($has('FABRIC_VERSION') || $has('LOADER_VERSION'))
-                ? 3
-                : ($nameMentions('fabric') ? 2 : 0),
-            default    => 0,
+            'forge' => [
+                'url' => 'https://raw.githubusercontent.com/pelican-eggs/minecraft/refs/heads/main/java/forge/egg-forge-minecraft.yaml',
+                'format' => EggFormat::YAML,
+                'uuid' => 'ed072427-f209-4603-875c-f540c6dd5a65',
+                'path' => '/java/forge/egg-forge-minecraft.yaml',
+            ],
+            'neoforge' => [
+                'url' => 'https://raw.githubusercontent.com/pelican-eggs/minecraft/refs/heads/main/java/neoforge/egg-neo-forge.json',
+                'format' => EggFormat::JSON,
+                'uuid' => 'e23e092f-b803-4f34-82cf-2d6518c6351a',
+                'path' => '/java/neoforge/egg-neo-forge.json',
+            ],
+            'fabric' => [
+                'url' => 'https://raw.githubusercontent.com/pelican-eggs/minecraft/refs/heads/main/java/fabric/egg-fabric.yaml',
+                'format' => EggFormat::YAML,
+                'uuid' => '78b02ebb-fec8-49c5-943c-ca4aa117b693',
+                'path' => '/java/fabric/egg-fabric.yaml',
+            ],
+            'quilt' => [
+                'url' => 'https://raw.githubusercontent.com/pelican-eggs/minecraft/refs/heads/main/java/quilt/egg-quilt.yaml',
+                'format' => EggFormat::YAML,
+                'uuid' => 'dff33655-6e6a-4430-accf-e5aea04c2912',
+                'path' => '/java/quilt/egg-quilt.yaml',
+            ],
+            default => null,
         };
     }
 
-    /**
-     * Import a loader egg bundled with the plugin (resources/eggs/<loader>.json) when the
-     * panel has no matching egg installed. Returns the imported egg, or null if there's no
-     * bundled egg for the loader or the import fails. Best-effort — never throws.
-     */
-    private function importBundledLoaderEgg(ModpackInstall $record, string $loader): ?Egg
+    private function findOfficialPelicanEgg(string $loader): ?Egg
     {
-        $path = dirname(__DIR__, 2) . "/resources/eggs/{$loader}.json";
-        if (!is_file($path)) {
+        $source = $this->officialPelicanEggSource($loader);
+        if (!$source) {
+            return null;
+        }
+
+        foreach (Egg::with('variables')->get() as $egg) {
+            if (strtolower((string) $egg->uuid) === strtolower($source['uuid'])) {
+                return $egg;
+            }
+
+            $updateUrl = strtolower((string) $egg->update_url);
+            if ($updateUrl !== '' && str_contains($updateUrl, strtolower($source['path']))) {
+                return $egg;
+            }
+        }
+
+        return null;
+    }
+
+    private function importOfficialPelicanEgg(ModpackInstall $record, string $loader): ?Egg
+    {
+        $source = $this->officialPelicanEggSource($loader);
+        if (!$source) {
             return null;
         }
 
         try {
-            $record->appendLog("  No {$loader} egg found — importing the bundled “{$loader}” egg…");
+            $record->appendLog("  No current official Pelican {$loader} egg is installed — downloading it from pelican-eggs/minecraft…");
 
-            $content = (string) file_get_contents($path);
-            $imported = app(EggImporterService::class)->fromContent($content, EggFormat::JSON);
+            $response = Http::timeout(20)->retry(2, 300)->get($source['url']);
+            if (!$response->successful() || trim($response->body()) === '') {
+                throw new RuntimeException('GitHub returned HTTP ' . $response->status());
+            }
 
-            $record->appendLog("  Imported egg “{$imported->name}” (id {$imported->id}).");
+            $imported = app(EggImporterService::class)->fromContent($response->body(), $source['format']);
+            $record->appendLog("  Imported official Pelican egg “{$imported->name}” (id {$imported->id}) directly from pelican-eggs/minecraft.");
 
-            // Re-run scoring against all eggs (incl. the freshly imported one) so we pick the
-            // best match by the same rules as everything else.
-            return $this->findLoaderEgg($loader);
+            return $imported->load('variables');
         } catch (Throwable $e) {
-            $record->appendLog('  WARNING: could not import the bundled egg (' . $e->getMessage() . ').');
+            $record->appendLog('  WARNING: could not download/import the official Pelican egg (' . $e->getMessage() . ').');
             return null;
         }
     }
@@ -1411,8 +2110,7 @@ class ModpackInstallService
                     $url  = $cf->getDownloadUrl($pid, $fid);
                     $name = $name ?: ('mod-' . $fid . '.jar');
                 } catch (Throwable $e) {
-                    $record->appendLog("  WARN: skipping file #{$fid} (" . $e->getMessage() . ')');
-                    continue;
+                    throw new RuntimeException("Required CurseForge file #{$fid} could not be resolved: " . $e->getMessage(), 0, $e);
                 }
             }
 
@@ -1463,7 +2161,7 @@ class ModpackInstallService
             $path = $f['path'] ?? null;
             $url  = $f['downloads'][0] ?? null;
             if (empty($path) || empty($url)) {
-                continue;
+                throw new RuntimeException('A server-supported Modrinth file entry is missing its path or download URL.');
             }
 
             $dir  = trim(str_replace('\\', '/', dirname($path)), '/');
@@ -1492,7 +2190,7 @@ class ModpackInstallService
     /**
      * FTB: download each server-side file from its FTB-hosted URL. Files that only
      * carry a CurseForge {project,file} reference are resolved in one batch via
-     * CurseForgeService (needs the CF key); if that's unavailable they're skipped.
+     * CurseForgeService (needs the CF key). Missing required files fail the install visibly.
      */
     private function assembleFtb(ModpackInstall $record, array $plan): void
     {
@@ -1520,7 +2218,6 @@ class ModpackInstallService
 
         $downloads  = [];
         $createdDirs = [];
-        $skipped    = 0;
         foreach ($files as $f) {
             $name = $f['name'];
             $url  = $f['url'] ?? null;
@@ -1537,8 +2234,7 @@ class ModpackInstallService
             }
 
             if (empty($url)) {
-                $skipped++;
-                continue;
+                throw new RuntimeException('Required FTB server file “' . $name . '” has no resolvable download URL.');
             }
 
             $dir       = trim((string) ($f['dir'] ?? ''), '/');
@@ -1552,7 +2248,7 @@ class ModpackInstallService
             $downloads[] = ['url' => $url, 'dir' => $remoteDir, 'name' => $name];
         }
 
-        $record->appendLog('  Prepared ' . count($downloads) . ' file downloads for Wings…' . ($skipped ? " ({$skipped} skipped — no resolvable URL)" : ''));
+        $record->appendLog('  Prepared ' . count($downloads) . ' file downloads for Wings…');
         $this->pullFilesThrottled($record, $downloads);
 
         $note = "Installed from an FTB (modpacks.ch) pack by Modpack Manager.\n"
@@ -1577,8 +2273,14 @@ class ModpackInstallService
 
         $downloads = [];
         foreach ($files as $f) {
+            $url = $f['url'] ?? null;
+            $name = $f['name'] ?? null;
+            if (empty($url) || empty($name)) {
+                throw new RuntimeException('ATLauncher returned a required server file without a download URL or filename.');
+            }
+
             $remoteDir = '/' . trim((string) ($f['dir'] ?? 'mods'), '/');
-            $downloads[] = ['url' => $f['url'], 'dir' => $remoteDir, 'name' => $f['name']];
+            $downloads[] = ['url' => $url, 'dir' => $remoteDir, 'name' => $name];
         }
 
         $record->appendLog('  Prepared ' . count($downloads) . ' mod downloads for Wings…');

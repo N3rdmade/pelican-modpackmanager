@@ -65,14 +65,26 @@ class ModBrowserPage extends Page
     public string $search   = '';
     public string $provider = 'all';    // 'all' | 'curseforge' | 'modrinth'
 
-    // Facet filters (best-effort).
-    public string $filterVersion = '';  // Minecraft version, e.g. '1.20.1'
-    public string $filterLoader  = '';  // loader (mods) / platform (plugins) slug
+    // Facet filters.
+    public string $filterVersion = '';
+    public array  $filterLoaders = [];
+    public array  $filterCategories = [];
 
     /** @var array<int, array<string, mixed>> */
-    public array  $items     = [];
-    public bool   $isLoading = false;
-    public string $errorMsg  = '';
+    public array  $items          = [];
+    public bool   $isLoading      = false;
+    public bool   $isLoadingMore  = false;
+    public bool   $hasMore        = false;
+    public int    $page           = 0;
+    public int    $pageSize       = 20;
+    public string $errorMsg       = '';
+    public array  $providerErrors = [];
+
+    // Description/gallery modal state
+    public bool    $showInfoModal = false;
+    public ?array  $infoItem      = null;
+    public string  $infoMode      = 'description';
+    public string  $infoError     = '';
 
     // Install drawer state
     public bool    $showModal        = false;
@@ -89,6 +101,63 @@ class ModBrowserPage extends Page
     public bool $canManage = false;
 
     private const COMBINED_PROVIDERS = ['curseforge', 'modrinth'];
+
+    /**
+     * Shared category pills for individual mods. Each key maps one friendly label
+     * to the closest category used by each provider.
+     */
+    private const MOD_CATEGORY_FILTERS = [
+        'performance' => [
+            'label' => 'Performance',
+            'modrinth' => ['optimization'],
+            'curseforge' => ['performance'],
+        ],
+        'cosmetics' => [
+            'label' => 'Cosmetics',
+            'modrinth' => ['decoration'],
+            'curseforge' => ['cosmetic'],
+        ],
+        'creatures' => [
+            'label' => 'Creatures',
+            'modrinth' => ['mobs'],
+            'curseforge' => ['mobs'],
+        ],
+        'technology' => [
+            'label' => 'Technology',
+            'modrinth' => ['technology'],
+            'curseforge' => ['technology'],
+        ],
+        'magic' => [
+            'label' => 'Magic',
+            'modrinth' => ['magic'],
+            'curseforge' => ['magic'],
+        ],
+        'worldgen' => [
+            'label' => 'World Gen',
+            'modrinth' => ['worldgen'],
+            'curseforge' => ['world gen', 'world generation'],
+        ],
+        'storage' => [
+            'label' => 'Storage',
+            'modrinth' => ['storage'],
+            'curseforge' => ['storage'],
+        ],
+        'utility' => [
+            'label' => 'Utility / QoL',
+            'modrinth' => ['utility'],
+            'curseforge' => ['utility & qol', 'server utility'],
+        ],
+        'food' => [
+            'label' => 'Food',
+            'modrinth' => ['food'],
+            'curseforge' => ['food'],
+        ],
+        'equipment' => [
+            'label' => 'Equipment',
+            'modrinth' => ['equipment'],
+            'curseforge' => ['armor, tools, and weapons', 'armor tools and weapons'],
+        ],
+    ];
 
     // ─── Authorization / visibility ─────────────────────────────────────────────
 
@@ -143,8 +212,9 @@ class ModBrowserPage extends Page
         $this->canManage = $this->userCanManage();
 
         // Auto-detect Mods vs Plugins from the egg, and seed the loader/platform filter.
-        $this->mode         = $this->detectMode($server);
-        $this->filterLoader = $this->detectLoaderOrPlatform($server) ?? '';
+        $this->mode = $this->detectMode($server);
+        $detectedLoader = $this->detectLoaderOrPlatform($server);
+        $this->filterLoaders = $detectedLoader ? [$detectedLoader] : [];
 
         // Default the version filter to the server's own Minecraft version so the
         // catalogue only shows content compatible with what it actually runs. The
@@ -365,21 +435,115 @@ class ModBrowserPage extends Page
             : ['forge' => 'Forge', 'neoforge' => 'NeoForge', 'fabric' => 'Fabric', 'quilt' => 'Quilt'];
     }
 
-    private function activeFilters(): array
+    /** Friendly cross-provider category pills for individual mods. */
+    public function getCategoryFilterOptions(): array
     {
-        return array_filter([
-            'gameVersion' => $this->filterVersion,
-            'loader'      => $this->filterLoader,
-        ], fn ($v) => $v !== '');
+        if ($this->mode !== 'mods') {
+            return [];
+        }
+
+        $options = [];
+        foreach (self::MOD_CATEGORY_FILTERS as $slug => $definition) {
+            $options[$slug] = $definition['label'];
+        }
+
+        return $options;
     }
 
-    /**
-     * Count of the filters that live in the Filters panel (the loader/platform).
-     * The Minecraft version has its own top-line selector, so it isn't counted here.
-     */
+    private function activeFilters(): array
+    {
+        $filters = [];
+
+        if ($this->filterVersion !== '') {
+            $filters['gameVersion'] = $this->filterVersion;
+        }
+        if (!empty($this->filterLoaders)) {
+            $filters['loaders'] = array_values($this->filterLoaders);
+            if (count($this->filterLoaders) === 1) {
+                $filters['loader'] = $this->filterLoaders[0];
+            }
+        }
+        if ($this->mode === 'mods' && !empty($this->filterCategories)) {
+            $filters['contentCategories'] = array_values($this->filterCategories);
+        }
+
+        return $filters;
+    }
+
     public function getActiveFilterCount(): int
     {
-        return $this->filterLoader !== '' ? 1 : 0;
+        return count($this->filterLoaders) + count($this->filterCategories);
+    }
+
+    public function getActiveFilterChips(): array
+    {
+        $chips = [];
+
+        $labels = $this->getFilterLoaderOptions();
+        foreach ($this->filterLoaders as $loader) {
+            $chips[] = [
+                'type' => 'loader',
+                'value' => $loader,
+                'label' => $labels[$loader] ?? ucfirst($loader),
+            ];
+        }
+
+        $categoryLabels = $this->getCategoryFilterOptions();
+        foreach ($this->filterCategories as $category) {
+            $chips[] = [
+                'type' => 'category',
+                'value' => $category,
+                'label' => $categoryLabels[$category] ?? ucfirst($category),
+            ];
+        }
+
+        return $chips;
+    }
+
+    public function removeFilterChip(string $type, string $value = ''): void
+    {
+        if ($type === 'loader') {
+            $value = strtolower(trim($value));
+            $this->filterLoaders = array_values(array_filter($this->filterLoaders, fn ($loader) => $loader !== $value));
+        } elseif ($type === 'category') {
+            $value = strtolower(trim($value));
+            $this->filterCategories = array_values(array_filter($this->filterCategories, fn ($category) => $category !== $value));
+        } else {
+            return;
+        }
+
+        $this->resetResults();
+        $this->loadItems();
+    }
+
+    public function toggleLoader(string $loader): void
+    {
+        $loader = strtolower(trim($loader));
+        if (!array_key_exists($loader, $this->getFilterLoaderOptions())) {
+            return;
+        }
+
+        if (in_array($loader, $this->filterLoaders, true)) {
+            $this->filterLoaders = array_values(array_filter($this->filterLoaders, fn ($item) => $item !== $loader));
+        } else {
+            $this->filterLoaders[] = $loader;
+            $this->filterLoaders = array_values(array_unique($this->filterLoaders));
+        }
+    }
+
+    public function toggleCategory(string $category): void
+    {
+        $category = strtolower(trim($category));
+        if (!array_key_exists($category, $this->getCategoryFilterOptions())) {
+            return;
+        }
+
+        if (in_array($category, $this->filterCategories, true)) {
+            $this->filterCategories = array_values(array_filter($this->filterCategories, fn ($item) => $item !== $category));
+        } else {
+            $this->filterCategories[] = $category;
+            $this->filterCategories = array_values(array_unique($this->filterCategories));
+        }
     }
 
     // ─── Actions ──────────────────────────────────────────────────────────────
@@ -392,36 +556,123 @@ class ModBrowserPage extends Page
         }
 
         $this->mode = $mode;
-        // Loader/platform slugs and installed folder differ per mode — reset both.
-        $this->filterLoader = $this->detectLoaderOrPlatform($this->getServer()) ?? '';
-        $this->search       = '';
+        $detectedLoader = $this->detectLoaderOrPlatform($this->getServer());
+        $this->filterLoaders = $detectedLoader ? [$detectedLoader] : [];
+        $this->filterCategories = [];
+        $this->search = '';
         $this->loadInstalledFiles();
+        $this->resetResults();
         $this->loadItems();
     }
 
     public function searchItems(): void
     {
+        $this->resetResults();
         $this->loadItems();
     }
 
     public function applyFilters(): void
     {
+        $this->resetResults();
         $this->loadItems();
     }
 
     public function clearFilters(): void
     {
-        // Only the panel's own filter (loader/platform). The MC version has its own
-        // selector and is left as-is.
-        $this->filterLoader = '';
+        $this->filterLoaders = [];
+        $this->filterCategories = [];
+        $this->resetResults();
         $this->loadItems();
     }
 
     public function setProvider(string $provider): void
     {
         $this->provider = in_array($provider, ['all', 'curseforge', 'modrinth'], true) ? $provider : 'all';
-        $this->search   = '';
+        $this->search = '';
+        $this->resetResults();
         $this->loadItems();
+    }
+
+    public function loadMore(): void
+    {
+        if ($this->isLoading || $this->isLoadingMore || !$this->hasMore) {
+            return;
+        }
+
+        $this->page++;
+        $this->loadItems(true);
+    }
+
+    public function retryProviderSearches(): void
+    {
+        $this->resetResults();
+        $this->loadItems();
+    }
+
+    public function openItemInfo(string|int $itemId, string $provider, string $mode = 'description'): void
+    {
+        if (!in_array($mode, ['description', 'gallery'], true)) {
+            $mode = 'description';
+        }
+
+        $this->infoMode = $mode;
+        $this->infoError = '';
+        $this->infoItem = collect($this->items)->first(
+            fn ($item) => (string) ($item['id'] ?? '') === (string) $itemId
+                && ($item['provider'] ?? null) === $provider
+        );
+        $this->showInfoModal = true;
+
+        try {
+            $details = $this->fetchSingleItem($itemId, $provider);
+            $this->infoItem = array_merge($this->infoItem ?? [], $details);
+
+            if ($provider === 'curseforge') {
+                $description = app(CurseForgeService::class)->getDescription((int) $itemId);
+                if ($description !== '') {
+                    $this->infoItem['description'] = $description;
+                }
+            }
+        } catch (Throwable $e) {
+            $this->infoError = 'Could not load the full ' . $this->contentNoun() . ' details.';
+            Log::info('[ModpackManager] Individual content detail lookup failed', [
+                'provider' => $provider,
+                'id' => (string) $itemId,
+                'error' => $e->getMessage(),
+            ]);
+        }
+    }
+
+    public function closeItemInfo(): void
+    {
+        $this->showInfoModal = false;
+        $this->infoItem = null;
+        $this->infoError = '';
+    }
+
+    public function externalUrl(?string $url): ?string
+    {
+        return is_string($url) && preg_match('#^https?://#i', $url) ? $url : null;
+    }
+
+    public function itemWebsiteUrl(array $item): ?string
+    {
+        $url = $this->externalUrl($item['websiteUrl'] ?? null);
+        $slug = trim((string) ($item['slug'] ?? ''));
+        $provider = $item['provider'] ?? null;
+
+        if ($provider === 'curseforge' && $slug !== '') {
+            $path = $this->mode === 'plugins' ? 'bukkit-plugins' : 'mc-mods';
+            return $url ?? 'https://www.curseforge.com/minecraft/' . $path . '/' . rawurlencode($slug);
+        }
+        if ($provider === 'modrinth' && $slug !== '') {
+            $path = $this->mode === 'plugins' ? 'plugin' : 'mod';
+            if ($url === null || str_contains($url, '/modpack/')) {
+                return 'https://modrinth.com/' . $path . '/' . rawurlencode($slug);
+            }
+        }
+
+        return $url;
     }
 
     /**
@@ -469,8 +720,8 @@ class ModBrowserPage extends Page
      */
     private function preferredVersionId(): string
     {
-        $mc     = strtolower(trim($this->filterVersion));
-        $loader = strtolower(trim($this->filterLoader));
+        $mc = strtolower(trim($this->filterVersion));
+        $loaders = array_values(array_filter(array_map(fn ($loader) => strtolower(trim((string) $loader)), $this->filterLoaders)));
 
         $tags = function (array $v): array {
             // CurseForge encodes MC versions + loader names in gameVersions; Modrinth
@@ -483,10 +734,10 @@ class ModBrowserPage extends Page
 
         if ($mc !== '') {
             // MC + loader.
-            if ($loader !== '') {
+            if (!empty($loaders)) {
                 foreach ($this->versions as $v) {
                     $t = $tags($v);
-                    if (in_array($mc, $t, true) && in_array($loader, $t, true)) {
+                    if (in_array($mc, $t, true) && count(array_intersect($loaders, $t)) > 0) {
                         return (string) $v['id'];
                     }
                 }
@@ -690,61 +941,187 @@ class ModBrowserPage extends Page
 
     // ─── Data loading ───────────────────────────────────────────────────────────
 
-    private function loadItems(): void
+    private function resetResults(): void
     {
-        $this->isLoading = true;
-        $this->errorMsg  = '';
-        $this->items     = [];
+        $this->page = 0;
+        $this->hasMore = false;
+        $this->items = [];
+        $this->providerErrors = [];
+        $this->errorMsg = '';
+    }
+
+    private function loadItems(bool $append = false): void
+    {
+        if ($append) {
+            $this->isLoadingMore = true;
+        } else {
+            $this->isLoading = true;
+            $this->items = [];
+            $this->providerErrors = [];
+        }
+        $this->errorMsg = '';
 
         try {
             $filters = $this->activeFilters();
 
-            $this->items = $this->provider === 'all'
-                ? $this->searchAllProviders($this->search, $filters)
-                : $this->searchProvider($this->provider, $this->search, $filters);
+            if ($this->provider === 'all') {
+                [$results, $hasMore] = $this->searchAllProviders($this->search, $filters, $this->page);
+            } else {
+                $results = $this->searchProvider($this->provider, $this->search, $filters, $this->page, $this->pageSize);
+                $hasMore = count($results) >= $this->pageSize;
+                unset($this->providerErrors[$this->provider]);
+            }
+
+            if ($append) {
+                $merged = [];
+                foreach (array_merge($this->items, $results) as $item) {
+                    $key = ($item['provider'] ?? '') . ':' . (string) ($item['id'] ?? '');
+                    $merged[$key] = $item;
+                }
+                $this->items = array_values($merged);
+            } else {
+                $this->items = $results;
+            }
+
+            $this->hasMore = $hasMore;
         } catch (Throwable $e) {
             $this->errorMsg = $e->getMessage();
+            if ($this->provider !== 'all') {
+                $this->providerErrors[$this->provider] = $this->providerLabel($this->provider) . ' is temporarily unavailable.';
+            }
             Log::warning('[ModpackManager] Failed to load ' . $this->mode, ['error' => $e->getMessage()]);
         } finally {
             $this->isLoading = false;
+            $this->isLoadingMore = false;
         }
     }
 
-    /** Round-robin merge of the fast providers; a single provider failing is skipped. */
-    private function searchAllProviders(string $query, array $filters, int $perProvider = 12): array
+    private function searchAllProviders(string $query, array $filters, int $page = 0): array
     {
+        $perProvider = max(1, (int) ceil($this->pageSize / count(self::COMBINED_PROVIDERS)));
         $buckets = [];
+        $hasMore = false;
 
         foreach (self::COMBINED_PROVIDERS as $provider) {
             try {
-                $buckets[$provider] = array_slice($this->searchProvider($provider, $query, $filters), 0, $perProvider);
+                $items = $this->searchProvider($provider, $query, $filters, $page, $perProvider);
+                unset($this->providerErrors[$provider]);
+                $buckets[$provider] = $items;
+                $hasMore = $hasMore || count($items) >= $perProvider;
             } catch (Throwable $e) {
+                $this->providerErrors[$provider] = $this->providerLabel($provider) . ' is temporarily unavailable.';
                 Log::info("[ModpackManager] '{$provider}' {$this->mode} search skipped in combined view", ['error' => $e->getMessage()]);
                 $buckets[$provider] = [];
             }
         }
 
         $merged = [];
-        for ($i = 0; $i < $perProvider; $i++) {
-            foreach ($buckets as $packs) {
-                if (isset($packs[$i])) {
-                    $merged[] = $packs[$i];
+        for ($i = 0; $i < $perProvider && count($merged) < $this->pageSize; $i++) {
+            foreach ($buckets as $items) {
+                if (isset($items[$i])) {
+                    $merged[] = $items[$i];
+                    if (count($merged) >= $this->pageSize) {
+                        break;
+                    }
                 }
             }
         }
 
-        return $merged;
+        return [$merged, $hasMore];
     }
 
-    private function searchProvider(string $provider, string $query, array $filters): array
+    private function providerLabel(string $provider): string
+    {
+        return match ($provider) {
+            'curseforge' => 'CurseForge',
+            'modrinth' => 'Modrinth',
+            default => ucfirst($provider),
+        };
+    }
+
+    private function searchProvider(string $provider, string $query, array $filters, int $page = 0, int $pageSize = 20): array
     {
         if ($provider === 'curseforge') {
             $classId = $this->mode === 'plugins' ? CurseForgeService::CLASS_PLUGINS : CurseForgeService::CLASS_MODS;
-            return app(CurseForgeService::class)->searchContent($query, $classId, filters: $filters);
+            $filters = $this->categoryFiltersForCurseForge($filters, $classId);
+            if (($filters['contentCategoriesUnsupported'] ?? false) === true) {
+                return [];
+            }
+            return app(CurseForgeService::class)->searchContent($query, $classId, $page, $pageSize, $filters);
         }
 
         $projectType = $this->mode === 'plugins' ? 'plugin' : 'mod';
-        return app(ModrinthService::class)->searchByType($query, $projectType, filters: $filters);
+        $filters = $this->categoryFiltersForModrinth($filters);
+        if (($filters['contentCategoriesUnsupported'] ?? false) === true) {
+            return [];
+        }
+        return app(ModrinthService::class)->searchByType($query, $projectType, $page, $pageSize, $filters);
+    }
+
+    private function categoryFiltersForModrinth(array $filters): array
+    {
+        $selected = $filters['contentCategories'] ?? [];
+        unset($filters['contentCategories']);
+
+        if (empty($selected) || $this->mode !== 'mods') {
+            return $filters;
+        }
+
+        $categories = [];
+        foreach ($selected as $key) {
+            foreach (self::MOD_CATEGORY_FILTERS[$key]['modrinth'] ?? [] as $slug) {
+                $categories[$slug] = true;
+            }
+        }
+
+        if (empty($categories)) {
+            $filters['contentCategoriesUnsupported'] = true;
+        } else {
+            $filters['categories'] = array_keys($categories);
+        }
+
+        return $filters;
+    }
+
+    private function categoryFiltersForCurseForge(array $filters, int $classId): array
+    {
+        $selected = $filters['contentCategories'] ?? [];
+        unset($filters['contentCategories']);
+
+        if (empty($selected) || $this->mode !== 'mods') {
+            return $filters;
+        }
+
+        $wanted = [];
+        foreach ($selected as $key) {
+            foreach (self::MOD_CATEGORY_FILTERS[$key]['curseforge'] ?? [] as $name) {
+                $wanted[$this->normalizeCategoryName($name)] = true;
+            }
+        }
+
+        $ids = [];
+        foreach (app(CurseForgeService::class)->getContentCategories($classId) as $category) {
+            if (isset($wanted[$this->normalizeCategoryName((string) ($category['name'] ?? ''))])) {
+                $ids[(int) $category['id']] = true;
+            }
+        }
+
+        if (empty($ids)) {
+            $filters['contentCategoriesUnsupported'] = true;
+        } else {
+            $filters['categoryIds'] = array_keys($ids);
+        }
+
+        return $filters;
+    }
+
+    private function normalizeCategoryName(string $value): string
+    {
+        $value = strtolower(trim($value));
+        $value = str_replace('&', ' and ', $value);
+        $value = preg_replace('/[^a-z0-9]+/', ' ', $value) ?? $value;
+
+        return trim(preg_replace('/\\s+/', ' ', $value) ?? $value);
     }
 
     private function fetchSingleItem(string|int $id, ?string $provider): array
@@ -753,7 +1130,8 @@ class ModBrowserPage extends Page
             return app(CurseForgeService::class)->getMod((int) $id);
         }
 
-        return app(ModrinthService::class)->getProject((string) $id);
+        $projectType = $this->mode === 'plugins' ? 'plugin' : 'mod';
+        return app(ModrinthService::class)->getProject((string) $id, $projectType);
     }
 
     /**

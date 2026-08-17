@@ -44,9 +44,8 @@ class ATLauncherService
     /**
      * Search the (cached) full pack list client-side. Empty query lists newest.
      */
-    public function search(string $query = '', int $limit = 24, array $filters = []): array
+    public function search(string $query = '', int $page = 0, int $pageSize = 20, array $filters = []): array
     {
-        // $filters accepted for interface parity; ATLauncher's list has no facets.
         $packs = $this->allPacks();
         $query = trim(strtolower($query));
 
@@ -57,12 +56,18 @@ class ATLauncherService
             );
         }
 
-        // Newest packs first (higher id).
+        if (!empty($filters['gameVersion'])) {
+            $version = (string) $filters['gameVersion'];
+            $packs = array_filter($packs, fn (array $p) => collect($p['versions'] ?? [])->contains(
+                fn ($v) => (string) ($v['minecraft'] ?? '') === $version
+            ));
+        }
+
         usort($packs, fn ($a, $b) => ($b['id'] ?? 0) <=> ($a['id'] ?? 0));
 
         return array_values(array_map(
             fn (array $p) => $this->normalizePack($p),
-            array_slice(array_values($packs), 0, $limit)
+            array_slice(array_values($packs), $page * $pageSize, $pageSize)
         ));
     }
 
@@ -203,6 +208,7 @@ class ATLauncherService
             'slug'          => (string) ($pack['safeName'] ?? ''),
             'name'          => $pack['name'] ?? 'Unknown',
             'summary'       => $pack['description'] ?? '',
+            'description'   => $pack['description'] ?? '',
             'downloadCount' => 0,
             'iconUrl'       => null,
             'author'        => 'ATLauncher',
@@ -210,7 +216,15 @@ class ATLauncherService
             'gameVersions'  => $latest['minecraft'] ?? null,
             'loaders'       => [],
             'latestFileId'  => isset($latest['version']) ? (string) $latest['version'] : null,
+            'websiteUrl'    => $this->safeHttpUrl($pack['websiteURL'] ?? null)
+                ?? (!empty($pack['safeName']) ? 'https://atlauncher.com/pack/' . rawurlencode((string) $pack['safeName']) : null),
+            'gallery'       => [],
         ];
+    }
+
+    private function safeHttpUrl(mixed $url): ?string
+    {
+        return is_string($url) && preg_match('#^https?://#i', $url) ? $url : null;
     }
 
     /**
