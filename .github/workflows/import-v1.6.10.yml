@@ -30,6 +30,7 @@ jobs:
               cat "$f"
             fi | tr -d '[:space:]'
           done | base64 -d > /tmp/modpack-manager-v1.6.10.zip
+          echo "accf3447e5bba6616a09756d857c698ff7c7aa53e144c0754b9880313d035924  /tmp/modpack-manager-v1.6.10.zip" | sha256sum -c -
           rm -rf /tmp/v1610
           mkdir -p /tmp/v1610
           unzip -q /tmp/modpack-manager-v1.6.10.zip -d /tmp/v1610
