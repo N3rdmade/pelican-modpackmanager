@@ -1,0 +1,47 @@
+name: Build clean v1.6.10 branch
+
+on:
+  push:
+    branches:
+      - v1.6.10-transfer
+
+permissions:
+  contents: write
+
+jobs:
+  build-clean-branch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout transfer branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Reconstruct patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .v1610-patch/part0 .v1610-patch/part1 | tr -d '[:space:]' | base64 -d > /tmp/v1610.patch
+          test -s /tmp/v1610.patch
+          grep -q '^diff --git a/plugin.json b/plugin.json' /tmp/v1610.patch
+
+      - name: Build clean release branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "N3rdmade"
+          git config user.email "161110729+N3rdmade@users.noreply.github.com"
+          git switch --detach 78eaf093113d364220f644bd10c0e43e6ff7d422
+          git apply --check /tmp/v1610.patch
+          git apply /tmp/v1610.patch
+          test "$(git status --short | wc -l)" -eq 11
+          grep -q '"version": "1.6.10"' plugin.json
+          while IFS= read -r f; do
+            case "$f" in
+              *.php) php -l "$f" >/dev/null ;;
+            esac
+          done < <(git diff --name-only)
+          git add -A
+          git commit -m "Release v1.6.10"
+          git branch -f v1.6.10-clean HEAD
+          git push --force origin v1.6.10-clean
