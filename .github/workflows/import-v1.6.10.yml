@@ -28,7 +28,7 @@ jobs:
               head -c -2 "$f"
             else
               cat "$f"
-            fi
+            fi | tr -d '[:space:]'
           done | base64 -d > /tmp/modpack-manager-v1.6.10.zip
           rm -rf /tmp/v1610
           mkdir -p /tmp/v1610
