@@ -23,7 +23,13 @@ jobs:
       - name: Rebuild and import package
         run: |
           set -euo pipefail
-          cat .v1610-stage/part*.b64 | base64 -d > /tmp/modpack-manager-v1.6.10.zip
+          for f in .v1610-stage/part*.b64; do
+            if [ "$f" = ".v1610-stage/part06.b64" ]; then
+              head -c -2 "$f"
+            else
+              cat "$f"
+            fi
+          done | base64 -d > /tmp/modpack-manager-v1.6.10.zip
           rm -rf /tmp/v1610
           mkdir -p /tmp/v1610
           unzip -q /tmp/modpack-manager-v1.6.10.zip -d /tmp/v1610
