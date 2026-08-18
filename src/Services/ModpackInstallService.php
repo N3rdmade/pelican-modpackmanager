@@ -14,6 +14,7 @@ use App\Services\Backups\InitiateBackupService;
 use App\Services\Eggs\EggChangerService;
 use App\Services\Eggs\Sharing\EggImporterService;
 use App\Services\Servers\ReinstallServerService;
+use Cosmii02\ModpackManager\Exceptions\InstallCancelledException;
 use Cosmii02\ModpackManager\Models\ModpackInstall;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
@@ -38,12 +39,13 @@ class ModpackInstallService
 {
     private const ARCHIVE_NAME = 'modpack-download.zip';
     private const DEFAULT_REMOTE_DOWNLOAD_CONCURRENCY = 3;
+    private const DEFAULT_PANEL_FALLBACK_CONCURRENCY = 4;
 
     public function __construct(
         private DaemonFileRepository $fileRepo
     ) {}
 
-    public function install(ModpackInstall $record, array $options = []): void
+    public function install(ModpackInstall $record, array $options = [], array $spec = []): void
     {
         $server = $record->server;
 
@@ -51,7 +53,12 @@ class ModpackInstallService
             throw new RuntimeException('Server not found for modpack install record #' . $record->id);
         }
 
-        $spec = Cache::pull("modpack-manager:install-spec:{$record->id}");
+        // New jobs carry their install plan directly so a cache clear, plugin
+        // reload, or cache backend mismatch cannot strand a queued install. Keep the
+        // old cache lookup only so jobs queued by an older build can still finish.
+        if (empty($spec)) {
+            $spec = Cache::pull("modpack-manager:install-spec:{$record->id}") ?? [];
+        }
 
         if (empty($spec) || empty($spec['provider'])) {
             throw new RuntimeException(
@@ -62,31 +69,55 @@ class ModpackInstallService
         $this->fileRepo->setServer($server);
 
         try {
+            $this->ensureInstallNotDismissed($record);
             $this->stepDeleteSelectedBackups($record, $options);
+            $this->ensureInstallNotDismissed($record);
             $this->stepSaveConfig($record);
+            $this->ensureInstallNotDismissed($record);
             $this->stepCreateBackup($record, $options);
+            $this->ensureInstallNotDismissed($record);
             $this->stepDeleteWorlds($record, $options);
+            $this->ensureInstallNotDismissed($record);
             $this->stepDeleteFiles($record, $options);
+            $this->ensureInstallNotDismissed($record);
 
             $plan = $this->resolvePlan($record, $spec);
+            $this->ensureInstallNotDismissed($record);
 
             if (!empty($plan['archiveUrl'])) {
                 $this->stepDownload($record, $plan['archiveUrl']);
+                $this->ensureInstallNotDismissed($record);
                 $this->stepExtract($record);
             } else {
                 // FTB/ATLauncher ship a file list, not a single archive.
                 $this->skipArchiveSteps($record);
             }
 
+            $this->ensureInstallNotDismissed($record);
             $this->stepAssembleAndMerge($record, $plan, $spec);
+            $this->ensureInstallNotDismissed($record);
             $this->stepRestoreConfig($record, $options);
+            $this->ensureInstallNotDismissed($record);
             $this->stepFinalize($record);
+            $this->ensureInstallNotDismissed($record);
             $this->stepConfigureLoader($record, $plan);
+            $this->ensureInstallNotDismissed($record);
             $this->syncServerIcon($record);
 
-            $record->update(['status' => 'installed', 'progress' => 100]);
+            $record->update(['status' => 'installed', 'progress' => 100, 'error_message' => null]);
             $record->appendLog('Installation completed successfully.');
 
+        } catch (InstallCancelledException $e) {
+            $record->update([
+                'status' => 'failed',
+                'error_message' => $e->getMessage(),
+            ]);
+            $record->appendLog('Installation cancelled. Queue worker released.');
+            Log::info('[ModpackManager] Installation cancelled', [
+                'record' => $record->id,
+                'reason' => $e->getMessage(),
+            ]);
+            return;
         } catch (Throwable $e) {
             Log::error('[ModpackManager] Installation failed', [
                 'record' => $record->id,
@@ -101,19 +132,42 @@ class ModpackInstallService
         }
     }
 
+    /** Stop work as soon as an install has been cancelled or superseded. */
+    private function ensureInstallNotDismissed(ModpackInstall $record): void
+    {
+        $record->refresh();
+
+        if ($record->status === 'cancelling') {
+            throw new InstallCancelledException($record->error_message ?: 'Installation cancelled.');
+        }
+
+        // Compatibility with installs cancelled by earlier test builds.
+        if ($record->status === 'failed') {
+            $reason = strtolower((string) $record->error_message);
+            if (str_contains($reason, 'cancel') || str_contains($reason, 'supersed') || str_contains($reason, 'stopping')) {
+                throw new InstallCancelledException($record->error_message ?: 'Installation cancelled.');
+            }
+        }
+    }
+
     /**
      * Mirror the installed modpack artwork onto Pelican's server icon. This is
      * cosmetic and must never turn an otherwise successful install into a failure.
      */
     private function syncServerIcon(ModpackInstall $record): void
     {
-        $url = trim((string) ($record->modpack_icon_url ?? ''));
-        if ($url === '' || !preg_match('#^https?://#i', $url)) {
+        $url = $this->resolveServerIconUrl($record);
+        if ($url === null) {
+            $record->appendLog('  Server icon was not changed: no artwork URL was available for this pack.');
             return;
         }
 
         try {
-            $response = Http::timeout(20)->retry(2, 250)->get($url);
+            $response = Http::withHeaders([
+                'User-Agent' => 'pelican-modpack-manager/1.6.9',
+                'Accept' => 'image/avif,image/webp,image/png,image/jpeg,image/*,*/*;q=0.8',
+            ])->connectTimeout(10)->timeout(30)->retry(2, 250)->get($url);
+
             if ($response->failed()) {
                 throw new RuntimeException('image request returned HTTP ' . $response->status());
             }
@@ -146,7 +200,16 @@ class ModpackInstallService
                 return;
             }
 
+            // Pelican's native icon URL is stable (uuid + extension). If two
+            // consecutive packs are both PNG, a browser can continue displaying
+            // the old cached uuid.png even after writeIcon() replaces it. When GD
+            // is available, alternate the format so the URL itself changes. The
+            // normal writeIcon() method then removes every older icon extension.
+            [$extension, $data] = $this->avoidServerIconCacheCollision($server, $extension, $data);
+
             $server->writeIcon($extension, $data);
+            $server->refresh();
+            $record->update(['modpack_icon_url' => $url]);
             $record->appendLog('  Updated the Pelican server icon from the modpack artwork.');
         } catch (Throwable $e) {
             Log::info('[ModpackManager] Server icon update skipped', [
@@ -155,6 +218,83 @@ class ModpackInstallService
                 'error' => $e->getMessage(),
             ]);
             $record->appendLog('  Server icon was not changed: ' . $e->getMessage());
+        }
+    }
+
+    private function resolveServerIconUrl(ModpackInstall $record): ?string
+    {
+        $stored = trim((string) ($record->modpack_icon_url ?? ''));
+        if ($stored !== '' && preg_match('#^https?://#i', $stored)) {
+            return $stored;
+        }
+
+        try {
+            $project = match ($record->provider) {
+                'curseforge' => app(CurseForgeService::class)->getMod((int) $record->modpack_id),
+                'modrinth' => app(ModrinthService::class)->getProject((string) $record->modpack_id),
+                'ftb' => app(FtbService::class)->getProject((string) $record->modpack_id),
+                'atlauncher' => app(ATLauncherService::class)->getProject((string) $record->modpack_id),
+                default => [],
+            };
+
+            $url = trim((string) ($project['iconUrl'] ?? ''));
+            if ($url !== '' && preg_match('#^https?://#i', $url)) {
+                $record->update(['modpack_icon_url' => $url]);
+                return $url;
+            }
+        } catch (Throwable $e) {
+            Log::info('[ModpackManager] Could not refresh modpack artwork URL', [
+                'record' => $record->id,
+                'provider' => $record->provider,
+                'error' => $e->getMessage(),
+            ]);
+        }
+
+        return null;
+    }
+
+    /**
+     * @return array{0:string,1:string}
+     */
+    private function avoidServerIconCacheCollision(Server $server, string $extension, string $data): array
+    {
+        $currentUrl = (string) ($server->icon ?? '');
+        $currentPath = (string) (parse_url($currentUrl, PHP_URL_PATH) ?? '');
+        $currentExtension = strtolower((string) pathinfo($currentPath, PATHINFO_EXTENSION));
+
+        if ($currentExtension === '' || $currentExtension !== $extension || !function_exists('imagecreatefromstring')) {
+            return [$extension, $data];
+        }
+
+        $image = @imagecreatefromstring($data);
+        if ($image === false) {
+            return [$extension, $data];
+        }
+
+        try {
+            $target = $extension === 'webp' ? 'png' : 'webp';
+            if ($target === 'webp' && !function_exists('imagewebp')) {
+                $target = 'png';
+            }
+            if ($target === 'png' && !function_exists('imagepng')) {
+                return [$extension, $data];
+            }
+
+            ob_start();
+            $ok = $target === 'webp'
+                ? imagewebp($image, null, 90)
+                : imagepng($image, null, 6);
+            $converted = (string) ob_get_clean();
+
+            if (!$ok || $converted === '') {
+                return [$extension, $data];
+            }
+
+            return [$target, $converted];
+        } finally {
+            if (is_resource($image) || $image instanceof \GdImage) {
+                imagedestroy($image);
+            }
         }
     }
 
@@ -422,7 +562,9 @@ class ModpackInstallService
             $deadline  = time() + 900; // 15 minutes
             $completed = false;
             while (time() < $deadline) {
+                $this->ensureInstallNotDismissed($record);
                 sleep(5);
+                $this->ensureInstallNotDismissed($record);
                 $backup->refresh();
                 if ($backup->completed_at !== null) {
                     $completed = true;
@@ -609,7 +751,9 @@ class ModpackInstallService
         $stable   = 0;
 
         while (time() < $deadline) {
+            $this->ensureInstallNotDismissed($record);
             sleep(4);
+            $this->ensureInstallNotDismissed($record);
             $size = $this->remoteFileSize('/', self::ARCHIVE_NAME);
 
             if ($size === null) {
@@ -646,6 +790,7 @@ class ModpackInstallService
 
         $this->fileRepo->decompressFile('/', self::ARCHIVE_NAME);
         $record->appendLog('  Extraction complete.');
+        $this->repairExtractedPermissions($record);
 
         $record->update(['progress' => 58]);
         $record->markStepDone('extract');
@@ -816,7 +961,6 @@ class ModpackInstallService
             // Non-fatal.
         }
 
-        $this->normalizeUnusablePermissions($record);
         $this->writeInstalledMetadata($record);
 
         Cache::forget("modpack-manager:config:{$record->id}");
@@ -828,30 +972,149 @@ class ModpackInstallService
     }
 
     /**
-     * Some ZIPs carry Unix mode 000 entries. Wings can extract them successfully,
-     * but the game container cannot read those files afterwards. Repair only entries
-     * with no permission bits at all and leave every other mode unchanged.
+     * Archive extraction can preserve mode 000 from a pack. Check permissions
+     * immediately after extraction, before manifests, overrides, or launchers are used.
+     * Wings performs each subtree search locally so the Panel does not need to make
+     * one HTTP request for every directory in a large modpack.
      */
-    private function normalizeUnusablePermissions(ModpackInstall $record): void
+    private function repairExtractedPermissions(ModpackInstall $record): void
     {
         $filesFixed = 0;
         $directoriesFixed = 0;
+        $checked = 0;
 
-        $this->normalizeUnusablePermissionsInDirectory('/', $filesFixed, $directoriesFixed);
+        try {
+            $rootEntries = $this->fileRepo->getDirectory('/');
+        } catch (Throwable $e) {
+            throw new RuntimeException(
+                'Could not inspect extracted file permissions in /: ' . $e->getMessage(),
+                0,
+                $e
+            );
+        }
+
+        $scanRoots = [];
+        $rootFilesToFix = [];
+        $rootDirectoriesToFix = [];
+
+        foreach ($rootEntries as $entry) {
+            $name = (string) ($entry['name'] ?? '');
+            if ($name === '' || $name === '.' || $name === '..' || (bool) ($entry['symlink'] ?? false)) {
+                continue;
+            }
+
+            $checked++;
+            $isDirectory = (bool) ($entry['directory'] ?? false);
+
+            if ($this->entryHasNoPermissions($entry)) {
+                if ($isDirectory) {
+                    $rootDirectoriesToFix[] = $name;
+                } else {
+                    $rootFilesToFix[] = $name;
+                }
+            }
+
+            if ($isDirectory) {
+                $scanRoots[] = '/' . ltrim($name, '/');
+            }
+        }
+
+        $this->chmodPermissionPaths($rootDirectoriesToFix, '0755', $directoriesFixed);
+        $this->chmodPermissionPaths($rootFilesToFix, '0644', $filesFixed);
+
+        $totalRoots = count($scanRoots);
+        if ($totalRoots > 0) {
+            $record->appendLog("  Permission scan: 0/{$totalRoots} top-level directories, {$checked} entries checked…");
+        }
+
+        $reportEvery = max(1, (int) ceil(max(1, $totalRoots) / 5));
+
+        foreach ($scanRoots as $index => $scanRoot) {
+            $directoryFixesBefore = $directoriesFixed;
+
+            try {
+                $entries = $this->fileRepo->search('*?*', $scanRoot);
+                if (!is_array($entries) || !array_is_list($entries)) {
+                    throw new RuntimeException('Wings returned an invalid recursive search response.');
+                }
+
+                $filesToFix = [];
+                $directoriesToFix = [];
+
+                foreach ($entries as $entry) {
+                    if (!is_array($entry)) {
+                        continue;
+                    }
+
+                    $name = (string) ($entry['name'] ?? '');
+                    if ($name === '' || $name === '.' || $name === '..' || (bool) ($entry['symlink'] ?? false)) {
+                        continue;
+                    }
+
+                    $checked++;
+                    if (!$this->entryHasNoPermissions($entry)) {
+                        continue;
+                    }
+
+                    $relativePath = ltrim(str_replace('\\', '/', $name), '/');
+                    if ($relativePath === '') {
+                        continue;
+                    }
+
+                    if ((bool) ($entry['directory'] ?? false)) {
+                        $directoriesToFix[] = $relativePath;
+                    } else {
+                        $filesToFix[] = $relativePath;
+                    }
+                }
+
+                $this->chmodPermissionPaths($directoriesToFix, '0755', $directoriesFixed);
+                $this->chmodPermissionPaths($filesToFix, '0644', $filesFixed);
+
+                // If a broken directory was repaired, make one exhaustive pass through
+                // this subtree so entries hidden behind that directory are not missed.
+                if ($directoriesFixed > $directoryFixesBefore) {
+                    $this->repairPermissionsRecursively(
+                        $scanRoot,
+                        $filesFixed,
+                        $directoriesFixed,
+                        $checked
+                    );
+                }
+            } catch (Throwable $e) {
+                // Older Wings builds may not support the recursive search endpoint.
+                // Keep correctness by falling back only for this top-level subtree.
+                $record->appendLog("    Fast permission scan unavailable for {$scanRoot}; using compatibility scan.");
+                $this->repairPermissionsRecursively(
+                    $scanRoot,
+                    $filesFixed,
+                    $directoriesFixed,
+                    $checked
+                );
+            }
+
+            $done = $index + 1;
+            if ($done === $totalRoots || $done % $reportEvery === 0) {
+                $record->appendLog("  Permission scan: {$done}/{$totalRoots} top-level directories, {$checked} entries checked…");
+            }
+        }
 
         if ($filesFixed > 0 || $directoriesFixed > 0) {
             $record->appendLog(
-                "  Repaired unusable extracted permissions: {$filesFixed} file(s), {$directoriesFixed} "
+                "  Permission check complete: {$checked} entries checked; repaired {$filesFixed} file(s), {$directoriesFixed} "
                 . ($directoriesFixed === 1 ? 'directory' : 'directories')
                 . '.'
             );
+        } else {
+            $record->appendLog("  Permission check complete: {$checked} entries checked; no unusable permissions found.");
         }
     }
 
-    private function normalizeUnusablePermissionsInDirectory(
+    private function repairPermissionsRecursively(
         string $directory,
         int &$filesFixed,
-        int &$directoriesFixed
+        int &$directoriesFixed,
+        int &$checked
     ): void {
         try {
             $entries = $this->fileRepo->getDirectory($directory);
@@ -871,6 +1134,7 @@ class ModpackInstallService
                 continue;
             }
 
+            $checked++;
             $path = ($directory === '/' ? '' : rtrim($directory, '/')) . '/' . $name;
             $relativePath = ltrim($path, '/');
             $isDirectory = (bool) ($entry['directory'] ?? false);
@@ -891,27 +1155,27 @@ class ModpackInstallService
                     }
                     $directoriesFixed++;
                 } else {
-                    $filesToFix[] = [
-                        'file' => $relativePath,
-                        'mode' => '0644',
-                    ];
+                    $filesToFix[] = $relativePath;
                 }
             }
 
             if ($isDirectory) {
-                $this->normalizeUnusablePermissionsInDirectory($path, $filesFixed, $directoriesFixed);
+                $this->repairPermissionsRecursively(
+                    $path,
+                    $filesFixed,
+                    $directoriesFixed,
+                    $checked
+                );
             }
 
             if (count($filesToFix) >= 200) {
-                $this->chmodPermissionBatch($filesToFix);
-                $filesFixed += count($filesToFix);
+                $this->chmodPermissionPaths($filesToFix, '0644', $filesFixed);
                 $filesToFix = [];
             }
         }
 
         if ($filesToFix !== []) {
-            $this->chmodPermissionBatch($filesToFix);
-            $filesFixed += count($filesToFix);
+            $this->chmodPermissionPaths($filesToFix, '0644', $filesFixed);
         }
     }
 
@@ -927,18 +1191,31 @@ class ModpackInstallService
     }
 
     /**
-     * @param array<int, array{file:string, mode:string}> $files
+     * @param array<int, string> $paths
      */
-    private function chmodPermissionBatch(array $files): void
+    private function chmodPermissionPaths(array $paths, string $mode, int &$fixed): void
     {
-        try {
-            $this->fileRepo->chmodFiles('/', $files);
-        } catch (Throwable $e) {
-            throw new RuntimeException(
-                'Could not repair unusable extracted file permissions: ' . $e->getMessage(),
-                0,
-                $e
+        foreach (array_chunk(array_values(array_unique($paths)), 200) as $chunk) {
+            if ($chunk === []) {
+                continue;
+            }
+
+            $files = array_map(
+                fn (string $path) => ['file' => ltrim($path, '/'), 'mode' => $mode],
+                $chunk
             );
+
+            try {
+                $this->fileRepo->chmodFiles('/', $files);
+            } catch (Throwable $e) {
+                throw new RuntimeException(
+                    'Could not repair unusable extracted file permissions: ' . $e->getMessage(),
+                    0,
+                    $e
+                );
+            }
+
+            $fixed += count($chunk);
         }
     }
 
@@ -1193,8 +1470,22 @@ class ModpackInstallService
             throw new RuntimeException("No automatic Pelican egg mapping is available for loader {$loader}.");
         }
 
+        // Normalize Forge's exact Maven coordinate before it reaches the egg.  The official
+        // Forge egg treats a non-empty FORGE_VERSION as the literal Maven artifact version.
+        // Legacy 1.7.10/1.8.9 artifacts repeat the Minecraft version at the end, so the pack's
+        // build-only metadata (10.13.4.1614) must become
+        // 1.7.10-10.13.4.1614-1.7.10.  Do this here, before the egg/variable layer, so every
+        // provider follows the same rule and no later variable-name logic can bypass it.
+        $eggLoaderVersion = $ver;
+        if ($loaderKey === 'forge') {
+            $eggLoaderVersion = $this->forgeVersionForEgg($mc, $ver);
+            if ($eggLoaderVersion !== null && $eggLoaderVersion !== '' && $eggLoaderVersion !== trim((string) $ver)) {
+                $record->appendLog("  Legacy Forge coordinate: {$ver} → {$eggLoaderVersion}");
+            }
+        }
+
         $server = $record->server->refresh();
-        $egg = $this->switchToLoaderEgg($record, $server, $loaderKey, $mc, $ver);
+        $egg = $this->switchToLoaderEgg($record, $server, $loaderKey, $mc, $eggLoaderVersion);
         if (!$egg) {
             throw new RuntimeException("No usable official Pelican {$loaderKey} egg is available.");
         }
@@ -1240,7 +1531,9 @@ class ModpackInstallService
 
             $deadline = time() + 900;
             do {
+                $this->ensureInstallNotDismissed($record);
                 sleep(5);
+                $this->ensureInstallNotDismissed($record);
                 $server = $server->refresh();
                 $status = $server->status;
                 $statusValue = $status instanceof \BackedEnum ? $status->value : (string) $status;
@@ -1400,8 +1693,22 @@ class ModpackInstallService
             // dies with a Java "unable to access jarfile" error. NeoForge is the opposite: its egg
             // wants just the build number (21.1.221) in NEOFORGE_VERSION, so leave that untouched.
             $loaderVer = $ver;
-            if ($loader === 'forge' && $ver !== null && $ver !== '' && $mc && !str_contains($ver, '-')) {
-                $loaderVer = "{$mc}-{$ver}";
+            if ($loader === 'forge' && $ver !== null && $ver !== '' && $mc) {
+                // Forge 1.7.10 and 1.8.9 use legacy Maven coordinates with the
+                // Minecraft version repeated at the end (for example
+                // 1.7.10-10.13.4.1614-1.7.10). The official Pelican Forge egg
+                // handles this when it resolves a build itself, but when we
+                // provide FORGE_VERSION explicitly we must provide that exact
+                // coordinate or the reinstall can finish without server.jar.
+                if (in_array($mc, ['1.7.10', '1.8.9'], true)) {
+                    if (preg_match('/^' . preg_quote($mc, '/') . '-([0-9][0-9.]*)$/', $ver, $legacy)) {
+                        $loaderVer = "{$mc}-{$legacy[1]}-{$mc}";
+                    } elseif (preg_match('/^[0-9][0-9.]*$/', $ver)) {
+                        $loaderVer = "{$mc}-{$ver}-{$mc}";
+                    }
+                } elseif (!str_contains($ver, '-')) {
+                    $loaderVer = "{$mc}-{$ver}";
+                }
             }
 
             $set(match ($loader) {
@@ -1414,6 +1721,52 @@ class ModpackInstallService
         if ($applied) {
             $record->appendLog('  Set variables: ' . json_encode($applied));
         }
+    }
+
+    /**
+     * Convert pack Forge metadata into the exact version string expected by the official
+     * Pelican Forge egg when FORGE_VERSION is explicitly populated.
+     */
+    private function forgeVersionForEgg(?string $mc, ?string $version): ?string
+    {
+        $mc = trim((string) $mc);
+        $version = trim((string) $version);
+
+        if ($version === '') {
+            return null;
+        }
+
+        if ($mc === '') {
+            return $version;
+        }
+
+        if (in_array($mc, ['1.7.10', '1.8.9'], true)) {
+            // Already the complete legacy coordinate.
+            if (str_starts_with($version, $mc . '-') && str_ends_with($version, '-' . $mc)) {
+                return $version;
+            }
+
+            // Providers may give either just the Forge build (10.13.4.1614) or the normal
+            // modern-style coordinate (1.7.10-10.13.4.1614).  Strip the leading MC version,
+            // then rebuild the legacy coordinate deterministically.
+            $build = str_starts_with($version, $mc . '-')
+                ? substr($version, strlen($mc) + 1)
+                : $version;
+
+            if (str_ends_with($build, '-' . $mc)) {
+                return $mc . '-' . $build;
+            }
+
+            return $mc . '-' . $build . '-' . $mc;
+        }
+
+        // Modern Forge uses <minecraft>-<forge-build> unless the provider already supplied
+        // the complete coordinate.
+        if (!str_starts_with($version, $mc . '-')) {
+            return $mc . '-' . $version;
+        }
+
+        return $version;
     }
 
     /**
@@ -1756,6 +2109,14 @@ class ModpackInstallService
 
         if ($loader === 'forge' && $mc && version_compare($mc, '1.17', '<')) {
             if (!$this->remotePathExists('/server.jar')) {
+                $legacyJar = $this->findLegacyForgeServerJar($mc);
+                if ($legacyJar !== null) {
+                    $this->replaceRemoteEntry('/' . $legacyJar, '/server.jar');
+                    $record->appendLog("  Legacy Forge compatibility: renamed {$legacyJar} to server.jar.");
+                }
+            }
+
+            if (!$this->remotePathExists('/server.jar')) {
                 throw new RuntimeException('Forge egg reinstall finished, but server.jar was not created.');
             }
             $record->appendLog('  Preflight: legacy Forge server.jar found.');
@@ -1767,6 +2128,38 @@ class ModpackInstallService
         }
 
         $record->appendLog("  Preflight: {$loader} unix_args.txt found.");
+    }
+
+    private function findLegacyForgeServerJar(string $mc): ?string
+    {
+        try {
+            $entries = $this->fileRepo->getDirectory('/');
+        } catch (Throwable) {
+            return null;
+        }
+
+        $matches = [];
+        foreach ($entries as $entry) {
+            $name = (string) ($entry['name'] ?? '');
+            if ($name === '' || !preg_match('/^forge-' . preg_quote($mc, '/') . '-.+\.jar$/i', $name)) {
+                continue;
+            }
+
+            if (preg_match('/(?:installer|sources|javadoc|userdev|changelog)/i', $name)) {
+                continue;
+            }
+
+            $priority = str_contains(strtolower($name), 'universal') ? 0 : 1;
+            $matches[] = [$priority, $name];
+        }
+
+        if ($matches === []) {
+            return null;
+        }
+
+        usort($matches, static fn (array $a, array $b): int => $a[0] <=> $b[0] ?: strnatcasecmp($a[1], $b[1]));
+
+        return $matches[0][1];
     }
 
     private function detectInstallerJarMeta(ModpackInstall $record, ?string $preferLoader = null): ?array
@@ -2294,7 +2687,9 @@ SCRIPT;
             $last = -1;
             $stable = 0;
             while (time() < $deadline) {
+                $this->ensureInstallNotDismissed($record);
                 sleep(4);
+                $this->ensureInstallNotDismissed($record);
                 $size = $this->remoteFileSize('/', self::ARCHIVE_NAME);
                 if ($size === null) {
                     continue;
@@ -2313,6 +2708,7 @@ SCRIPT;
                 try {
                     $this->fileRepo->decompressFile('/', self::ARCHIVE_NAME);
                     $record->appendLog('  Extracted the config bundle.');
+                    $this->repairExtractedPermissions($record);
                 } catch (Throwable $e) {
                     $record->appendLog('  WARNING: could not extract config bundle (' . $e->getMessage() . ').');
                 }
@@ -2441,31 +2837,80 @@ SCRIPT;
             return;
         }
 
-        $limit = $this->remoteDownloadConcurrency();
+        $limit = min(3, $this->remoteDownloadConcurrency());
         $total = count($downloads);
 
-        $record->appendLog("  Downloading {$total} file(s) via Wings, up to {$limit} at a time…");
+        $record->appendLog("  Downloading {$total} file(s); Wings handles normal sources, up to {$limit} at a time, with automatic fallback for incompatible FTB sources…");
 
         $pending = array_values($downloads);
         $active = [];
         $done = 0;
-        $lastLoggedDone = -1;
-        $lastProgressAt = time();
+        $lastLoggedDone = -10;
+        $lastProgressAt = microtime(true);
         $deadline = time() + max(540, $total * 90);
         $busyLoggedAt = 0;
+        $fallbackLogged = false;
+        $statusApiAvailable = null;
+        $statusFallbackLogged = false;
+
+        $this->reportFileDownloadProgress($record, $done, $total, $lastLoggedDone, true);
 
         while (!empty($pending) || !empty($active)) {
+            $this->ensureInstallNotDismissed($record);
+
             while (count($active) < $limit && !empty($pending)) {
+                $this->ensureInstallNotDismissed($record);
                 $next = $pending[0];
 
+                if ($this->requiresPanelDownloadFallback((string) $next['url'])) {
+                    $fallbackLimit = $this->panelFallbackConcurrency();
+                    $fallbackBatch = [];
+                    $stillPending = [];
+
+                    foreach ($pending as $candidate) {
+                        if (
+                            count($fallbackBatch) < $fallbackLimit
+                            && $this->requiresPanelDownloadFallback((string) ($candidate['url'] ?? ''))
+                        ) {
+                            $fallbackBatch[] = $candidate;
+                        } else {
+                            $stillPending[] = $candidate;
+                        }
+                    }
+
+                    $pending = $stillPending;
+
+                    if (!$fallbackLogged) {
+                        $record->appendLog(
+                            '  FTB source is incompatible with Wings remote pull (missing Content-Length); '
+                            . "using parallel Panel → Wings fallback, up to {$fallbackLimit} at a time."
+                        );
+                        $fallbackLogged = true;
+                    }
+
+                    $this->ensureInstallNotDismissed($record);
+                    $this->downloadFilesViaPanelFallbackBatch($record, $fallbackBatch);
+                    $this->ensureInstallNotDismissed($record);
+                    $done += count($fallbackBatch);
+                    $lastProgressAt = microtime(true);
+                    $this->reportFileDownloadProgress($record, $done, $total, $lastLoggedDone);
+                    continue;
+                }
+
                 try {
-                    $this->fileRepo->pull($next['url'], $next['dir'], [
+                    $response = $this->fileRepo->pull($next['url'], $next['dir'], [
                         'filename'   => $next['name'],
                         'foreground' => false,
                     ]);
                     array_shift($pending);
-                    $active[] = $next + ['lastSize' => null, 'stable' => 0];
-                    $lastProgressAt = time();
+
+                    $identifier = trim((string) ($response->json('identifier') ?? ''));
+                    $active[] = $next + [
+                        'identifier' => $identifier !== '' ? $identifier : null,
+                        'lastSize' => null,
+                        'stable' => 0,
+                    ];
+                    $lastProgressAt = microtime(true);
                 } catch (Throwable $e) {
                     if (!$this->isRemoteDownloadLimitError($e)) {
                         throw $e;
@@ -2481,49 +2926,334 @@ SCRIPT;
             }
 
             if (empty($active)) {
+                if (empty($pending)) {
+                    break;
+                }
+
                 if (time() >= $deadline) {
                     throw new RuntimeException("Timed out waiting for Wings download slots ({$done}/{$total} downloaded).");
                 }
 
-                sleep(5);
+                usleep(250000);
+                $this->ensureInstallNotDismissed($record);
                 continue;
             }
 
-            sleep(5);
+            // Wings exposes its active remote downloads directly. Polling that list lets us
+            // refill the three download slots as soon as a transfer finishes instead of
+            // waiting for two five-second file-size samples for every batch.
+            usleep(500000);
+            $this->ensureInstallNotDismissed($record);
+
+            $activeIds = null;
+            if ($statusApiAvailable !== false) {
+                try {
+                    $activeIds = $this->activeRemoteDownloadProgress($record->server);
+                    $statusApiAvailable = true;
+                } catch (Throwable $e) {
+                    $statusApiAvailable = false;
+                    if (!$statusFallbackLogged) {
+                        $record->appendLog('  Wings download-status endpoint unavailable; using fast file-size polling instead.');
+                        $statusFallbackLogged = true;
+                    }
+                }
+            }
 
             $remaining = [];
-            foreach ($active as $file) {
-                $size = $this->remoteFileSize($file['dir'], $file['name']);
+            $completed = [];
 
+            foreach ($active as $file) {
+                $identifier = $file['identifier'] ?? null;
+
+                if ($statusApiAvailable === true && $identifier !== null) {
+                    if (array_key_exists($identifier, $activeIds ?? [])) {
+                        $lastProgressAt = microtime(true);
+                        $remaining[] = $file;
+                        continue;
+                    }
+
+                    $completed[] = $file;
+                    continue;
+                }
+
+                // Compatibility fallback for older Wings builds that do not return a
+                // download identifier/status list. One-second stable-size detection is
+                // still much faster than the old two x five-second polling window.
+                $size = $this->remoteFileSize($file['dir'], $file['name']);
                 if ($size !== null && $size > 0) {
                     if ($file['lastSize'] !== null && $size === $file['lastSize']) {
                         $file['stable']++;
                     } else {
                         $file['stable'] = 0;
                         $file['lastSize'] = $size;
-                        $lastProgressAt = time();
+                        $lastProgressAt = microtime(true);
                     }
 
                     if ($file['stable'] >= 1) {
-                        $done++;
-                        $lastProgressAt = time();
+                        $completed[] = $file;
                         continue;
                     }
                 }
 
                 $remaining[] = $file;
             }
+
+            if (!empty($completed)) {
+                $this->verifyCompletedRemoteFiles($completed);
+                $done += count($completed);
+                $lastProgressAt = microtime(true);
+                $this->reportFileDownloadProgress($record, $done, $total, $lastLoggedDone);
+            }
+
             $active = $remaining;
 
-            if ($done !== $lastLoggedDone) {
-                $record->appendLog("  Downloaded {$done}/{$total} files…");
-                $record->update(['progress' => min(92, 64 + (int) (28 * $done / max(1, $total)))]);
-                $lastLoggedDone = $done;
-            }
-
-            if (time() >= $deadline || time() - $lastProgressAt > 300) {
+            if (time() >= $deadline || microtime(true) - $lastProgressAt > 300) {
                 throw new RuntimeException("Timed out waiting for Wings downloads ({$done}/{$total} downloaded).");
             }
+        }
+
+        $this->reportFileDownloadProgress($record, $done, $total, $lastLoggedDone, true);
+    }
+
+    /**
+     * @return array<string,float> keyed by Wings download identifier
+     */
+    private function activeRemoteDownloadProgress(Server $server): array
+    {
+        $response = $this->fileRepo->getHttpClient()
+            ->get("/api/servers/{$server->uuid}/files/pull");
+
+        $active = [];
+        foreach ((array) ($response->json('downloads') ?? []) as $download) {
+            $identifier = trim((string) ($download['Identifier'] ?? $download['identifier'] ?? ''));
+            if ($identifier === '') {
+                continue;
+            }
+
+            $active[$identifier] = (float) ($download['Progress'] ?? $download['progress'] ?? 0.0);
+        }
+
+        return $active;
+    }
+
+    /**
+     * Verify files that Wings says have left the active-download list. Directory
+     * listings are grouped so a pack with hundreds of mods does not issue one API
+     * request per completed file.
+     *
+     * @param array<int, array{dir:string,name:string}> $files
+     */
+    private function verifyCompletedRemoteFiles(array $files): void
+    {
+        $byDirectory = [];
+        foreach ($files as $file) {
+            $dir = (string) $file['dir'];
+            $byDirectory[$dir][] = (string) $file['name'];
+        }
+
+        foreach ($byDirectory as $dir => $names) {
+            $entries = [];
+            foreach ($this->fileRepo->getDirectory($dir) as $entry) {
+                $name = (string) ($entry['name'] ?? '');
+                if ($name !== '') {
+                    $entries[$name] = (int) ($entry['size'] ?? 0);
+                }
+            }
+
+            foreach ($names as $name) {
+                if (!isset($entries[$name]) || $entries[$name] <= 0) {
+                    throw new RuntimeException("Wings finished a remote download but {$dir}/{$name} is missing or empty.");
+                }
+            }
+        }
+    }
+
+    private function requiresPanelDownloadFallback(string $url): bool
+    {
+        $scheme = strtolower((string) parse_url($url, PHP_URL_SCHEME));
+        $host = strtolower((string) parse_url($url, PHP_URL_HOST));
+
+        return $scheme === 'https' && $host === 'dist.modpacks.ch';
+    }
+
+    /**
+     * Download a small batch of FTB-hosted files concurrently through the Panel.
+     * dist.modpacks.ch omits Content-Length, so Wings cannot pull these URLs
+     * directly. Fetching several at once removes the otherwise fully-serial FTB
+     * bottleneck while keeping memory usage bounded by a conservative batch size.
+     *
+     * @param array<int, array{url:string, dir:string, name:string}> $files
+     */
+    private function downloadFilesViaPanelFallbackBatch(ModpackInstall $record, array $files): void
+    {
+        $remaining = array_values($files);
+        $errors = [];
+
+        for ($attempt = 1; $attempt <= 3 && !empty($remaining); $attempt++) {
+            $this->ensureInstallNotDismissed($record);
+
+            try {
+                $responses = Http::pool(function ($pool) use ($record, $remaining) {
+                    $requests = [];
+
+                    foreach ($remaining as $index => $file) {
+                        $lastCancelCheck = 0.0;
+                        $requests[] = $pool->as((string) $index)
+                            ->withHeaders([
+                                'User-Agent' => 'pelican-modpack-manager/1.6.9',
+                            ])
+                            ->withOptions([
+                                'progress' => function () use ($record, &$lastCancelCheck): void {
+                                    $now = microtime(true);
+                                    if (($now - $lastCancelCheck) >= 0.5) {
+                                        $lastCancelCheck = $now;
+                                        $this->ensureInstallNotDismissed($record);
+                                    }
+                                },
+                            ])
+                            ->connectTimeout(10)
+                            ->timeout(60)
+                            ->get((string) $file['url']);
+                    }
+
+                    return $requests;
+                });
+            } catch (Throwable $e) {
+                $this->ensureInstallNotDismissed($record);
+
+                foreach ($remaining as $file) {
+                    $errors[(string) $file['name']] = $e->getMessage();
+                }
+
+                if ($attempt < 3) {
+                    usleep(500000);
+                    continue;
+                }
+
+                break;
+            }
+
+            $retry = [];
+
+            foreach ($remaining as $index => $file) {
+                $name = (string) $file['name'];
+                $response = $responses[(string) $index] ?? null;
+
+                if (!is_object($response) || !method_exists($response, 'successful') || !$response->successful()) {
+                    $status = is_object($response) && method_exists($response, 'status')
+                        ? 'HTTP ' . $response->status()
+                        : (is_object($response) && method_exists($response, 'getMessage')
+                            ? $response->getMessage()
+                            : 'request failed');
+                    $errors[$name] = $status;
+                    $retry[] = $file;
+                    continue;
+                }
+
+                try {
+                    $body = $response->body();
+                    if ($body === '') {
+                        throw new RuntimeException('empty response body');
+                    }
+
+                    $dir = '/' . trim((string) $file['dir'], '/');
+                    $path = $dir === '/'
+                        ? '/' . $name
+                        : rtrim($dir, '/') . '/' . $name;
+
+                    $this->fileRepo->putContent($path, $body);
+                    unset($errors[$name]);
+                } catch (Throwable $e) {
+                    $errors[$name] = $e->getMessage();
+                    $retry[] = $file;
+                }
+            }
+
+            $remaining = $retry;
+
+            if (!empty($remaining) && $attempt < 3) {
+                $this->ensureInstallNotDismissed($record);
+                usleep(500000);
+            }
+        }
+
+        if (!empty($remaining)) {
+            $first = $remaining[0];
+            $name = (string) ($first['name'] ?? 'unknown file');
+            $lastError = $errors[$name] ?? 'unknown error';
+
+            throw new RuntimeException(
+                'Could not download FTB-hosted file “' . $name . '” using the parallel Panel fallback: ' . $lastError
+            );
+        }
+    }
+
+    /**
+     * @param array{url:string, dir:string, name:string} $file
+     */
+    private function downloadFileViaPanelFallback(ModpackInstall $record, array $file): void
+    {
+        $url = (string) $file['url'];
+        $name = (string) $file['name'];
+        $dir = '/' . trim((string) $file['dir'], '/');
+        if ($dir === '/') {
+            $path = '/' . $name;
+        } else {
+            $path = rtrim($dir, '/') . '/' . $name;
+        }
+
+        $lastError = 'unknown error';
+
+        for ($attempt = 1; $attempt <= 3; $attempt++) {
+            try {
+                $lastCancelCheck = 0.0;
+                $response = Http::withHeaders([
+                    'User-Agent' => 'pelican-modpack-manager/1.6.9',
+                ])->withOptions([
+                    'progress' => function () use ($record, &$lastCancelCheck): void {
+                        $now = microtime(true);
+                        if (($now - $lastCancelCheck) >= 0.5) {
+                            $lastCancelCheck = $now;
+                            $this->ensureInstallNotDismissed($record);
+                        }
+                    },
+                ])->connectTimeout(10)->timeout(60)->get($url);
+
+                if (!$response->successful()) {
+                    $lastError = 'HTTP ' . $response->status();
+                } else {
+                    $this->fileRepo->putContent($path, $response->body());
+                    return;
+                }
+            } catch (Throwable $e) {
+                $lastError = $e->getMessage();
+            }
+
+            if ($attempt < 3) {
+                $this->ensureInstallNotDismissed($record);
+                usleep(500000);
+            }
+        }
+
+        throw new RuntimeException(
+            'Could not download FTB-hosted file “' . $name . '” using the Panel fallback: ' . $lastError
+        );
+    }
+
+    private function reportFileDownloadProgress(
+        ModpackInstall $record,
+        int $done,
+        int $total,
+        int &$lastLoggedDone,
+        bool $force = false
+    ): void {
+        $record->update([
+            'progress' => min(92, 64 + (int) (28 * $done / max(1, $total))),
+        ]);
+
+        if ($force || $done === $total || $done - $lastLoggedDone >= 10) {
+            $record->appendLog("  Downloaded {$done}/{$total} files…");
+            $lastLoggedDone = $done;
         }
     }
 
@@ -2532,6 +3262,17 @@ SCRIPT;
         return max(
             1,
             (int) config('modpack-manager.remote_download_concurrency', self::DEFAULT_REMOTE_DOWNLOAD_CONCURRENCY)
+        );
+    }
+
+    private function panelFallbackConcurrency(): int
+    {
+        return max(
+            1,
+            min(
+                8,
+                (int) config('modpack-manager.panel_fallback_concurrency', self::DEFAULT_PANEL_FALLBACK_CONCURRENCY)
+            )
         );
     }
 

@@ -102,7 +102,7 @@ class ModpackBrowserPage extends Page
     public int    $progress      = 0;
     public array  $steps         = [];
     public array  $debugLog      = [];
-    public string $installStatus = '';   // 'installing' | 'installed' | 'failed'
+    public string $installStatus = '';   // 'pending' | 'installing' | 'cancelling' | 'installed' | 'failed'
     public string $installError  = '';
     public ?int   $installStartedAt = null; // epoch ms — for the elapsed timer
     public int    $installElapsed   = 0;    // frozen elapsed seconds when finished
@@ -198,7 +198,7 @@ class ModpackBrowserPage extends Page
             ->first();
 
         if ($latest) {
-            if (in_array($latest->status, ['installing', 'pending'], true)) {
+            if (in_array($latest->status, ['installing', 'pending', 'cancelling'], true)) {
                 if ($this->isRecordStale($latest)) {
                     // The job never progressed (worker not running / crashed before
                     // it could mark the record failed). Auto-recover instead of
@@ -571,10 +571,22 @@ class ModpackBrowserPage extends Page
             }
         }
 
-        $this->selectedModpack  = $modpack;
-        $this->versions         = [];
-        $this->selectedVersion  = null;
-        $this->versionsLoading  = true;
+        $this->selectedModpack = $modpack;
+
+        // ATLauncher already returns every published version inside each Pack
+        // Object used to build the browser card. Reuse that data immediately
+        // instead of making the drawer wait on another provider request.
+        $embeddedAtLauncherVersions = (($modpack['provider'] ?? null) === 'atlauncher'
+            && isset($modpack['availableVersions'])
+            && is_array($modpack['availableVersions']))
+                ? array_values($modpack['availableVersions'])
+                : [];
+
+        $this->versions = $embeddedAtLauncherVersions;
+        $this->selectedVersion = !empty($embeddedAtLauncherVersions)
+            ? (string) ($embeddedAtLauncherVersions[0]['id'] ?? '')
+            : null;
+        $this->versionsLoading = empty($embeddedAtLauncherVersions);
         $isSameInstalledPack = $this->installedModpack
             && (string) ($this->installedModpack['id'] ?? '') === (string) ($modpack['id'] ?? '')
             && ($this->installedModpack['provider'] ?? null) === ($modpack['provider'] ?? null);
@@ -614,6 +626,21 @@ class ModpackBrowserPage extends Page
     public function loadVersions(): void
     {
         if (!$this->selectedModpack) {
+            return;
+        }
+
+        // ATLauncher version data is embedded in the Pack Object returned by
+        // the browser search. This avoids a slow/racy second HTTP request when
+        // Alpine initialises the drawer. Keep the provider lookup below only as
+        // a compatibility fallback for older/stale cards without that field.
+        if (($this->selectedModpack['provider'] ?? null) === 'atlauncher'
+            && !empty($this->selectedModpack['availableVersions'])
+            && is_array($this->selectedModpack['availableVersions'])) {
+            $this->versions = array_values($this->selectedModpack['availableVersions']);
+            if ($this->selectedVersion === null && !empty($this->versions)) {
+                $this->selectedVersion = (string) ($this->versions[0]['id'] ?? '');
+            }
+            $this->versionsLoading = false;
             return;
         }
 
@@ -711,6 +738,146 @@ class ModpackBrowserPage extends Page
     }
 
     /**
+     * Cancel old install jobs for this server before a replacement is queued.
+     * Unreserved database jobs can be removed immediately. A reserved job is
+     * already executing inside the queue worker, so request cancellation and wait
+     * briefly for the installer to acknowledge it instead of putting another job
+     * behind a worker that is still busy.
+     */
+    private function prepareServerForNewInstall(Server $server): bool
+    {
+        $runningRecordIds = [];
+
+        foreach ($this->queuedModpackJobs() as $queued) {
+            $recordId = $queued['record_id'];
+            $record = ModpackInstall::find($recordId);
+
+            if (!$record || $record->server_id !== $server->id) {
+                continue;
+            }
+
+            if ($queued['reserved_at'] === null) {
+                \Illuminate\Support\Facades\DB::table('jobs')->where('id', $queued['job_id'])->delete();
+
+                if (in_array($record->status, ['pending', 'installing', 'cancelling'], true)) {
+                    $record->update([
+                        'status' => 'failed',
+                        'error_message' => 'Superseded by a newer modpack install on this server.',
+                    ]);
+                    $record->appendLog('Cancelled automatically before the queued installer started.');
+                }
+
+                continue;
+            }
+
+            if ($record->status !== 'installed') {
+                if ($record->status !== 'cancelling') {
+                    $record->update([
+                        'status' => 'cancelling',
+                        'error_message' => 'Stopping this install before starting the replacement modpack.',
+                    ]);
+                    $record->appendLog('Cancellation requested because a newer modpack install was started on this server.');
+                }
+                $runningRecordIds[$recordId] = true;
+            }
+        }
+
+        // Also clean up active records that have no queue row at all. They cannot
+        // still be executing through the database queue and should not lock the UI.
+        $queuedIds = array_column($this->queuedModpackJobs(), 'record_id');
+        ModpackInstall::where('server_id', $server->id)
+            ->whereIn('status', ['pending', 'installing', 'cancelling'])
+            ->whereNotIn('id', $queuedIds ?: [-1])
+            ->get()
+            ->each(function (ModpackInstall $record): void {
+                $record->update([
+                    'status' => 'failed',
+                    'error_message' => 'Previous install no longer has an active queue job.',
+                ]);
+                $record->appendLog('Cleared stale install state before starting another modpack.');
+            });
+
+        if (empty($runningRecordIds)) {
+            return true;
+        }
+
+        // Most cancellation checkpoints are sub-second. Give a running operation a
+        // short window to stop; if it is still inside an external request, do not
+        // queue the replacement behind it and recreate the zombie-job problem.
+        $deadline = microtime(true) + 15.0;
+        do {
+            usleep(250000);
+            $stillRunning = [];
+
+            foreach ($this->queuedModpackJobs() as $queued) {
+                if ($queued['reserved_at'] !== null && isset($runningRecordIds[$queued['record_id']])) {
+                    $stillRunning[] = $queued['record_id'];
+                }
+            }
+
+            if (empty($stillRunning)) {
+                return true;
+            }
+        } while (microtime(true) < $deadline);
+
+        Notification::make()
+            ->title('Previous modpack install is still stopping')
+            ->body('The replacement was not queued, so it cannot get trapped behind the old job. Wait a few seconds and press Install again.')
+            ->warning()
+            ->send();
+
+        return false;
+    }
+
+    /**
+     * Return database queue rows that contain this plugin's install job.
+     *
+     * @return array<int,array{job_id:int,record_id:int,reserved_at:?int}>
+     */
+    private function queuedModpackJobs(): array
+    {
+        $result = [];
+
+        foreach (\Illuminate\Support\Facades\DB::table('jobs')->get() as $job) {
+            $payload = json_decode((string) $job->payload, true);
+            $serialized = $payload['data']['command'] ?? null;
+
+            if (!is_string($serialized) || $serialized === '') {
+                continue;
+            }
+
+            try {
+                $command = @unserialize($serialized, ['allowed_classes' => [InstallModpackJob::class]]);
+            } catch (Throwable) {
+                continue;
+            }
+
+            if (!$command instanceof InstallModpackJob) {
+                continue;
+            }
+
+            $result[] = [
+                'job_id' => (int) $job->id,
+                'record_id' => (int) $command->installRecordId,
+                'reserved_at' => $job->reserved_at !== null ? (int) $job->reserved_at : null,
+            ];
+        }
+
+        return $result;
+    }
+
+    private function installStillHasQueueJob(int $recordId): bool
+    {
+        foreach ($this->queuedModpackJobs() as $queued) {
+            if ($queued['record_id'] === $recordId) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
      * Dispatch the installation job.
      */
     public function startInstall(): void
@@ -787,6 +954,12 @@ class ModpackBrowserPage extends Page
         // Determine version label
         $versionLabel = $this->getVersionLabel($provider, $this->selectedVersion);
 
+        // Never put a new install behind a cancelled-but-still-running queue job.
+        if (!$this->prepareServerForNewInstall($server)) {
+            $this->showInstallConfirmation = true;
+            return;
+        }
+
         // Create install record
         $record = ModpackInstall::create([
             'server_id'       => $server->id,
@@ -798,15 +971,8 @@ class ModpackBrowserPage extends Page
             'status'          => 'pending',
             'steps'           => (new ModpackInstall())->buildInitialSteps(),
             'progress'        => 0,
-            'debug_log'       => [],
+            'debug_log'       => ['[' . now()->format('H:i:s') . '] Install queued; waiting for the Pelican queue worker.'],
         ]);
-
-        // Stash the spec for the queued job (no extra DB column needed).
-        \Illuminate\Support\Facades\Cache::put(
-            "modpack-manager:install-spec:{$record->id}",
-            $spec,
-            now()->addHours(2)
-        );
 
         // Capture the name before closeModal() nulls out $selectedModpack.
         $modpackName = $this->selectedModpack['name'];
@@ -830,7 +996,7 @@ class ModpackBrowserPage extends Page
         $this->installStartedAt = (int) ($record->created_at->valueOf());
         $this->installElapsed   = 0;
 
-        InstallModpackJob::dispatch($record->id, $installOptions)->onQueue('default');
+        InstallModpackJob::dispatch($record->id, $installOptions, $spec)->onQueue('default');
 
         Notification::make()
             ->title("Installing {$modpackName}…")
@@ -922,6 +1088,25 @@ class ModpackBrowserPage extends Page
             $this->installStartedAt = (int) ($record->created_at->valueOf());
         }
 
+        if ($record->status === 'failed') {
+            $reason = strtolower((string) $record->error_message);
+            $wasCancellation = str_contains($reason, 'cancel')
+                || str_contains($reason, 'supersed')
+                || str_contains($reason, 'stopping');
+
+            if ($wasCancellation) {
+                if ($this->installStillHasQueueJob($record->id)) {
+                    $this->isInstalling = true;
+                    $this->installStatus = 'cancelling';
+                    $this->installError = '';
+                    return;
+                }
+
+                $this->closeInstallConsole();
+                return;
+            }
+        }
+
         if (in_array($record->status, ['installed', 'failed'], true)) {
             $this->isInstalling = false;
             $this->installElapsed = $record->created_at
@@ -957,25 +1142,76 @@ class ModpackBrowserPage extends Page
      */
     public function cancelInstallView(): void
     {
-        if ($this->installId) {
-            $record = ModpackInstall::find($this->installId);
-            if ($record && in_array($record->status, ['pending', 'installing'], true)) {
-                $record->update([
-                    'status'        => 'failed',
-                    'error_message' => 'Dismissed from the panel.',
-                ]);
-                $record->appendLog('Dismissed by user from the panel.');
-                \Illuminate\Support\Facades\Cache::forget("modpack-manager:install-spec:{$record->id}");
+        if (!$this->installId) {
+            $this->closeInstallConsole();
+            return;
+        }
+
+        $record = ModpackInstall::find($this->installId);
+        if (!$record) {
+            $this->closeInstallConsole();
+            return;
+        }
+
+        if (in_array($record->status, ['installed', 'failed'], true)) {
+            $this->closeInstallConsole();
+            return;
+        }
+
+        $reserved = false;
+        $foundQueueJob = false;
+
+        foreach ($this->queuedModpackJobs() as $queued) {
+            if ($queued['record_id'] !== $record->id) {
+                continue;
+            }
+
+            $foundQueueJob = true;
+            if ($queued['reserved_at'] === null) {
+                \Illuminate\Support\Facades\DB::table('jobs')->where('id', $queued['job_id'])->delete();
+            } else {
+                $reserved = true;
             }
         }
 
+        if (!$reserved) {
+            $record->update([
+                'status' => 'failed',
+                'error_message' => 'Cancelled by user from the panel.',
+            ]);
+            $record->appendLog($foundQueueJob
+                ? 'Cancelled before the queued installer started.'
+                : 'Cancelled; no running queue job remained.');
+            \Illuminate\Support\Facades\Cache::forget("modpack-manager:install-spec:{$record->id}");
+            $this->closeInstallConsole();
+            return;
+        }
+
+        // The job is already executing. Keep the console locked in a truthful
+        // "Cancelling" state until the queue worker acknowledges the request and
+        // exits. Unlocking immediately is what previously let a new job get stuck
+        // behind the still-running one.
+        if ($record->status !== 'cancelling') {
+            $record->update([
+                'status' => 'cancelling',
+                'error_message' => 'Cancellation requested; waiting for the running installer to stop.',
+            ]);
+            $record->appendLog('Cancellation requested by user; waiting for the queue worker to stop safely.');
+        }
+
+        $this->isInstalling = true;
+        $this->installStatus = 'cancelling';
+        $this->installError = '';
+    }
+
+    private function closeInstallConsole(): void
+    {
         $this->isInstalling  = false;
         $this->installStatus = '';
         $this->installError  = '';
         $this->installId     = 0;
 
-        // Refresh the installed-pack banner from the latest good install, if any.
-        $server   = $this->getServer();
+        $server = $this->getServer();
         $installed = ModpackInstall::where('server_id', $server->id)
             ->where('status', 'installed')
             ->orderByDesc('id')

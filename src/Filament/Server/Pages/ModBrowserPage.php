@@ -934,6 +934,55 @@ class ModBrowserPage extends Page
             ->send();
     }
 
+    /**
+     * Enable/disable a mod or plugin by renaming .jar <-> .jar.disabled.
+     * Nothing is deleted and no provider-specific exclusion list is involved.
+     */
+    public function toggleInstalledFile(string $name): void
+    {
+        $this->authorizeManage();
+
+        if (!$this->installedFileIsKnown($name)) {
+            Notification::make()->title('That file is no longer present.')->warning()->send();
+            $this->loadInstalledFiles();
+            return;
+        }
+
+        $disabled = str_ends_with(strtolower($name), '.disabled');
+        $target = $disabled ? substr($name, 0, -9) : $name . '.disabled';
+
+        if ($target === '' || basename($target) !== $target) {
+            Notification::make()->title('Could not determine the target filename.')->danger()->send();
+            return;
+        }
+
+        $known = collect($this->installedFiles)->pluck('name')->all();
+        if (in_array($target, $known, true)) {
+            Notification::make()->title("{$target} already exists.")->warning()->send();
+            return;
+        }
+
+        try {
+            $repo = app(DaemonFileRepository::class);
+            $repo->setServer($this->getServer());
+            $repo->renameFiles('/' . $this->targetDir(), [[
+                'from' => $name,
+                'to' => $target,
+            ]]);
+        } catch (Throwable $e) {
+            Notification::make()->title('Could not change mod state: ' . $e->getMessage())->danger()->send();
+            return;
+        }
+
+        $this->loadInstalledFiles();
+
+        Notification::make()
+            ->title(($disabled ? 'Enabled ' : 'Disabled ') . preg_replace('/\.disabled$/i', '', $name))
+            ->body('Restart the server for the change to take effect.')
+            ->success()
+            ->send();
+    }
+
     public function refreshInstalled(): void
     {
         $this->loadInstalledFiles();
@@ -1193,6 +1242,17 @@ class ModBrowserPage extends Page
         return $lastSize > 0;
     }
 
+    private function installedFileIsKnown(string $name): bool
+    {
+        if ($name === '' || basename($name) !== $name) {
+            return false;
+        }
+
+        return collect($this->installedFiles)->contains(
+            fn ($file) => (string) ($file['name'] ?? '') === $name
+        );
+    }
+
     private function loadInstalledFiles(): void
     {
         $this->installedFiles = [];
@@ -1215,7 +1275,8 @@ class ModBrowserPage extends Page
             }
 
             $files[] = [
-                'name'      => $name,
+                'name' => $name,
+                'enabled' => !str_ends_with(strtolower($name), '.disabled'),
                 'sizeLabel' => $this->humanBytes((int) ($entry['size'] ?? 0)),
             ];
         }

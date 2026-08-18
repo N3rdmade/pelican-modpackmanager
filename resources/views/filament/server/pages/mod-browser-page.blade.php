@@ -195,16 +195,28 @@
     .mpm-refresh svg { width:14px; height:14px; }
     .mpm-jar { display:flex; align-items:center; gap:13px; padding:12px 20px; border-top:1px solid var(--mpm-border); }
     .mpm-jar:first-of-type { border-top:0; }
+    .mpm-jar.is-disabled { opacity:.68; }
     .mpm-jar__ico { flex-shrink:0; width:34px; height:34px; border-radius:9px; display:flex; align-items:center; justify-content:center;
         color:var(--mpm-accent); background:var(--mpm-accent-lo); border:1px solid color-mix(in srgb, var(--mpm-accent) 26%, transparent); }
     .mpm-jar__ico svg { width:17px; height:17px; }
+    .mpm-jar__body { min-width:0; flex:1; }
     .mpm-jar__name { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.82rem; font-weight:600; word-break:break-all; line-height:1.35; }
-    .mpm-jar__size { font-size:.72rem; color:var(--mpm-muted); margin-top:2px; }
-    .mpm-jar__rm { margin-left:auto; flex-shrink:0; display:inline-flex; align-items:center; gap:6px; padding:7px 12px; border-radius:10px; cursor:pointer;
+    .mpm-jar__size { display:flex; align-items:center; gap:7px; flex-wrap:wrap; font-size:.72rem; color:var(--mpm-muted); margin-top:2px; }
+    .mpm-jar__badge { display:inline-flex; align-items:center; padding:2px 6px; border-radius:999px; font-size:.62rem; font-weight:800; text-transform:uppercase; letter-spacing:.04em; }
+    .mpm-jar__badge--off { color:#fca5a5; background:color-mix(in srgb,var(--mpm-danger) 12%,transparent); border:1px solid color-mix(in srgb,var(--mpm-danger) 28%,transparent); }
+    .mpm-jar__actions { margin-left:auto; flex-shrink:0; display:flex; align-items:center; gap:8px; }
+    .mpm-toggle { display:inline-flex; align-items:center; gap:7px; padding:5px 8px; border-radius:10px; cursor:pointer; color:var(--mpm-text-2); background:transparent; border:1px solid transparent; font-size:.7rem; font-weight:750; }
+    .mpm-toggle:hover { background:var(--mpm-surface-2); border-color:var(--mpm-border); }
+    .mpm-toggle__track { position:relative; width:34px; height:19px; border-radius:999px; background:#3f3f46; transition:background .15s; }
+    .mpm-toggle__knob { position:absolute; left:3px; top:3px; width:13px; height:13px; border-radius:50%; background:#fff; transition:transform .15s; box-shadow:0 1px 4px rgba(0,0,0,.35); }
+    .mpm-toggle.is-on .mpm-toggle__track { background:#22c55e; }
+    .mpm-toggle.is-on .mpm-toggle__knob { transform:translateX(15px); }
+    .mpm-jar__rm { flex-shrink:0; display:inline-flex; align-items:center; gap:6px; padding:7px 12px; border-radius:10px; cursor:pointer;
         font-size:.76rem; font-weight:700; color:var(--mpm-danger); background:color-mix(in srgb, var(--mpm-danger) 10%, transparent);
         border:1px solid color-mix(in srgb, var(--mpm-danger) 30%, transparent); transition:all .15s; }
     .mpm-jar__rm:hover { background:color-mix(in srgb, var(--mpm-danger) 18%, transparent); }
     .mpm-jar__rm svg { width:13px; height:13px; }
+    @media (max-width:900px){ .mpm-jar { flex-wrap:wrap; } .mpm-jar__actions { width:100%; margin-left:47px; justify-content:flex-end; } }
     .mpm-installed__empty { padding:22px 20px; font-size:.83rem; color:var(--mpm-muted); text-align:center; }
     /* Cap the list height and scroll inside it so a server with hundreds of jars
        doesn't stretch the whole page. ~6 rows tall before it scrolls. */
@@ -549,22 +561,36 @@
 
         <div class="mpm-installed__list" x-ref="jarlist">
             @forelse($installedFiles as $file)
-                <div class="mpm-jar" wire:key="jar-{{ md5($file['name']) }}"
+                <div class="mpm-jar {{ $file['enabled'] ? '' : 'is-disabled' }}" wire:key="jar-{{ md5($file['name']) }}"
                      data-name="{{ strtolower($file['name']) }}" x-show="visible($el.dataset.name)">
                     <span class="mpm-jar__ico">
                         <svg fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.7" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/></svg>
                     </span>
-                    <div style="min-width:0;">
+                    <div class="mpm-jar__body">
                         <div class="mpm-jar__name">{{ $file['name'] }}</div>
-                        <div class="mpm-jar__size">{{ $file['sizeLabel'] }}</div>
+                        <div class="mpm-jar__size">
+                            <span>{{ $file['sizeLabel'] }}</span>
+                            @if(!$file['enabled'])
+                                <span class="mpm-jar__badge mpm-jar__badge--off">Disabled</span>
+                            @endif
+                        </div>
                     </div>
                     @if($canManage)
-                        <button type="button" class="mpm-jar__rm"
-                                wire:click="removeInstalledFile(@js($file['name']))"
-                                wire:confirm="Remove {{ $file['name'] }} from {{ $this->getTargetDirLabel() }}? Restart the server afterwards.">
-                            <svg fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
-                            Remove
-                        </button>
+                        <div class="mpm-jar__actions">
+                            <button type="button" class="mpm-toggle {{ $file['enabled'] ? 'is-on' : '' }}"
+                                    wire:click="toggleInstalledFile(@js($file['name']))"
+                                    aria-pressed="{{ $file['enabled'] ? 'true' : 'false' }}"
+                                    title="{{ $file['enabled'] ? 'Disable' : 'Enable' }} {{ $file['name'] }}">
+                                <span class="mpm-toggle__track"><span class="mpm-toggle__knob"></span></span>
+                                <span>{{ $file['enabled'] ? 'On' : 'Off' }}</span>
+                            </button>
+                            <button type="button" class="mpm-jar__rm"
+                                    wire:click="removeInstalledFile(@js($file['name']))"
+                                    wire:confirm="Remove {{ $file['name'] }} from {{ $this->getTargetDirLabel() }}? Restart the server afterwards.">
+                                <svg fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+                                Remove
+                            </button>
+                        </div>
                     @endif
                 </div>
             @empty

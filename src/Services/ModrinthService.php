@@ -151,6 +151,12 @@ class ModrinthService
             $facets[] = array_map(fn (string $loader) => 'categories:' . $loader, $requested);
         }
 
+        // Trust Modrinth's explicit environment metadata. Projects marked as
+        // unsupported on dedicated servers are excluded; unknown remains visible.
+        if ($projectType === 'mod') {
+            $facets[] = ['server_side:required', 'server_side:optional', 'server_side:unknown'];
+        }
+
         $categories = array_values(array_unique(array_filter(array_map(
             fn ($category) => strtolower(trim((string) $category)),
             is_array($filters['categories'] ?? null) ? $filters['categories'] : []

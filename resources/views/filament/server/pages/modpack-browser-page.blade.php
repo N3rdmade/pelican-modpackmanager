@@ -626,7 +626,7 @@
 <div class="mpm-shell">
 
     {{-- ══════════════ INSTALL CONSOLE (progress) ══════════════ --}}
-    @if ($isInstalling || in_array($installStatus, ['installing', 'failed']))
+    @if ($isInstalling || in_array($installStatus, ['installing', 'cancelling', 'failed']))
 
         <div wire:poll.2000ms="pollProgress"></div>
 
@@ -636,11 +636,13 @@
                     <p class="mpm-console__eyebrow">
                         @if($installStatus === 'failed') Deployment halted
                         @elseif($installStatus === 'installed') Deployment complete
+                        @elseif($installStatus === 'cancelling') Stopping installer
                         @else Deploying to server @endif
                     </p>
                     <h2 class="mpm-console__title {{ $installStatus === 'failed' ? 'err' : ($installStatus === 'installed' ? 'ok' : '') }}">
                         @if($installStatus === 'failed') Installation Failed
                         @elseif($installStatus === 'installed') Installation Complete
+                        @elseif($installStatus === 'cancelling') Cancelling installation…
                         @else Building your modpack… @endif
                     </h2>
                 </div>
@@ -746,13 +748,16 @@
                     </button>
                 @elseif($installStatus === 'failed')
                     <button type="button" wire:click="cancelInstallView" class="mpm-btn mpm-btn--ghost">Back to library</button>
+                @elseif($installStatus === 'cancelling')
+                    <button type="button" class="mpm-btn mpm-btn--ghost" disabled style="opacity:.65; cursor:not-allowed;">Cancelling…</button>
+                    <span style="font-size:.78rem; color:var(--mpm-muted);">Waiting for the running queue job to stop. The library will not unlock early and trap the next install behind it.</span>
                 @else
                     <button type="button" wire:click="cancelInstallView"
-                            wire:confirm="Dismiss this installation? If it's genuinely stuck this unlocks the page. If a worker is still processing it, this just stops watching."
+                            wire:confirm="Cancel this installation? If it is already running, this screen will stay here until the queue worker has actually stopped it."
                             class="mpm-btn mpm-btn--ghost">
-                        Dismiss / cancel
+                        Cancel install
                     </button>
-                    <span style="font-size:.78rem; color:var(--mpm-muted);">Stuck? Dismiss to unlock the page — no need to clear the queue manually.</span>
+                    <span style="font-size:.78rem; color:var(--mpm-muted);">Queued installs cancel immediately; running installs remain here until the worker has really stopped.</span>
                 @endif
             </div>
         </div>
