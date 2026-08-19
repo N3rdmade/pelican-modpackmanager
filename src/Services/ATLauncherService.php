@@ -93,6 +93,7 @@ class ATLauncherService
         });
     }
 
+
     public function getProject(string $idOrSlug): array
     {
         foreach ($this->allPacks() as $p) {
@@ -120,15 +121,34 @@ class ATLauncherService
             throw new RuntimeException("ATLauncher: pack {$safeName} not found");
         }
 
+        return $this->normalizeVersions($pack['versions'] ?? []);
+    }
+
+    /**
+     * Normalise the version list already returned with ATLauncher's Pack Object.
+     * Keeping this compact list on the browser card means opening the install
+     * drawer does not need a second ATLauncher API request just to populate the
+     * version dropdown.
+     *
+     * @param array<int,mixed> $versions
+     * @return array<int,array<string,mixed>>
+     */
+    private function normalizeVersions(array $versions): array
+    {
+        $versions = array_values(array_filter(
+            $versions,
+            fn ($v) => is_array($v) && isset($v['version']) && trim((string) $v['version']) !== ''
+        ));
+
         return array_values(array_map(fn (array $v) => [
             'id'            => (string) $v['version'],
-            'name'          => $v['version'],
-            'versionNumber' => $v['version'],
-            'displayName'   => $v['version'] . (isset($v['minecraft']) ? " — MC {$v['minecraft']}" : ''),
+            'name'          => (string) $v['version'],
+            'versionNumber' => (string) $v['version'],
+            'displayName'   => (string) $v['version'] . (!empty($v['minecraft']) ? " — MC {$v['minecraft']}" : ''),
             'datePublished' => isset($v['published']) ? date('c', (int) $v['published']) : null,
             'loaders'       => [],
-            'gameVersions'  => $v['minecraft'] ?? '',
-        ], $pack['versions'] ?? []));
+            'gameVersions'  => !empty($v['minecraft']) ? [(string) $v['minecraft']] : [],
+        ], $versions));
     }
 
     /**
@@ -210,12 +230,13 @@ class ATLauncherService
             'summary'       => $pack['description'] ?? '',
             'description'   => $pack['description'] ?? '',
             'downloadCount' => 0,
-            'iconUrl'       => null,
+            'iconUrl'       => $this->packImageUrl($pack),
             'author'        => 'ATLauncher',
             'dateModified'  => isset($latest['published']) ? date('c', (int) $latest['published']) : null,
             'gameVersions'  => $latest['minecraft'] ?? null,
             'loaders'       => [],
             'latestFileId'  => isset($latest['version']) ? (string) $latest['version'] : null,
+            'availableVersions' => $this->normalizeVersions($versions),
             'websiteUrl'    => $this->safeHttpUrl($pack['websiteURL'] ?? null)
                 ?? (!empty($pack['safeName']) ? 'https://atlauncher.com/pack/' . rawurlencode((string) $pack['safeName']) : null),
             'gallery'       => [],
@@ -225,6 +246,18 @@ class ATLauncherService
     private function safeHttpUrl(mixed $url): ?string
     {
         return is_string($url) && preg_match('#^https?://#i', $url) ? $url : null;
+    }
+
+    private function packImageUrl(array $pack): ?string
+    {
+        $safeName = strtolower(trim((string) ($pack['safeName'] ?? '')));
+        if ($safeName === '') {
+            return null;
+        }
+
+        // ATLauncher stores launcher pack art as a PNG named after the
+        // lower-cased safe name. The CDN is the same one used for pack files.
+        return self::CDN_URL . 'launcher/images/' . rawurlencode($safeName) . '.png';
     }
 
     /**

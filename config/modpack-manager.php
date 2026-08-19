@@ -80,6 +80,12 @@ return [
     // limit (3 by default); raise this only if your Wings config and API limits allow.
     'remote_download_concurrency' => max(1, (int) env('MODPACK_MANAGER_REMOTE_DOWNLOAD_CONCURRENCY', 3)),
 
+    // FTB's dist.modpacks.ch downloads do not provide Content-Length, so Wings
+    // cannot pull them directly. The Panel fallback downloads a small bounded
+    // batch concurrently, then writes each completed file to Wings. Four is a
+    // conservative default; advanced users can raise it to at most 8.
+    'panel_fallback_concurrency' => max(1, min(8, (int) env('MODPACK_MANAGER_PANEL_FALLBACK_CONCURRENCY', 4))),
+
     // ─── Scheduled update checks ───────────────────────────────────────────────
     // Periodically check installed modpacks for newer versions and notify the
     // server owner (panel bell) when a new version first appears.

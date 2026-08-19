@@ -19,10 +19,15 @@ class InstallModpackJob implements ShouldQueue
     public int $timeout = 3600; // 60 min – includes backup, download, loader install, and verification
     public int $tries   = 1;    // No retry; installation is not idempotent
 
+    public array $spec = [];
+
     public function __construct(
         public readonly int   $installRecordId,
-        public readonly array $options = []
-    ) {}
+        public readonly array $options = [],
+        array $spec = []
+    ) {
+        $this->spec = $spec;
+    }
 
     public function handle(ModpackInstallService $installService): void
     {
@@ -33,15 +38,15 @@ class InstallModpackJob implements ShouldQueue
             return;
         }
 
-        if ($record->status === 'installed') {
-            Log::info("[ModpackManager] InstallModpackJob: record #{$this->installRecordId} already installed, skipping.");
+        if ($record->status !== 'pending') {
+            Log::info("[ModpackManager] InstallModpackJob: record #{$this->installRecordId} is {$record->status}, not pending; skipping queued job.");
             return;
         }
 
         $record->update(['status' => 'installing']);
         $record->appendLog('Job started on queue worker.');
 
-        $installService->install($record, $this->options);
+        $installService->install($record, $this->options, $this->spec);
     }
 
     public function failed(Throwable $e): void
