@@ -7,19 +7,13 @@ use Illuminate\Support\ServiceProvider;
 
 class ModpackManagerServiceProvider extends ServiceProvider
 {
-    public function register(): void
-    {
-        $this->mergeConfigFrom(
-            plugin_path('modpack-manager', 'config/modpack-manager.php'),
-            'modpack-manager'
-        );
-    }
-
     public function boot(): void
     {
-        // Pelican auto-discovers plugin views (under the `modpack-manager::`
-        // namespace), migrations and artisan commands, so we don't register
-        // them here. We only need to wire up our scheduled task.
+        // Pelican auto-discovers plugin config (`config/modpack-manager.php` is
+        // loaded into the `modpack-manager` config key before providers are
+        // registered), views (under the `modpack-manager::` namespace),
+        // migrations and artisan commands, so none of that is registered here.
+        // We only need to wire up our scheduled task.
         $this->scheduleUpdateChecks();
     }
 

@@ -47,8 +47,8 @@ class ModpackManagerPlugin implements Plugin, HasPluginSettings
     // ─── HasPluginSettings ────────────────────────────────────────────────────
 
     // Only the keys the settings form actually binds to; the rest of the config
-    // isn't user-editable. Panels older than beta36 ignore this and fall back to
-    // the ->default()s below.
+    // isn't user-editable. The ->default()s on the fields below are a harmless
+    // fallback in case the panel ever renders the form unfilled.
     public function getSettingsFormData(): array
     {
         return [

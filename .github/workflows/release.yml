@@ -24,6 +24,7 @@ jobs:
             echo "::error::Could not read version from plugin.json"
             exit 1
           fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Releasing as: v${VERSION}"
 
@@ -38,11 +39,30 @@ jobs:
             --exclude '.DS_Store' \
             --exclude '*.tar.gz' \
             --exclude '*.zip' \
+            --exclude 'update.json' \
             ./ build/modpack-manager/
           ( cd build && zip -r -q -X ../modpack-manager.zip modpack-manager -x '*.DS_Store' )
           echo "--- zip contents (top level) ---"
           unzip -l modpack-manager.zip | head -n 20
           unzip -l modpack-manager.zip | grep -q 'modpack-manager/plugin.json'
+
+      # Pelican fetches this file from the `update_url` in plugin.json to decide
+      # whether an update is available. It is regenerated on every release and
+      # published as an asset of that release, so /releases/latest/download/update.json
+      # always describes the newest version. The "*" key is a panel-version
+      # wildcard: one plugin build serves every supported panel version.
+      - name: Generate update.json
+        run: |
+          set -euo pipefail
+          cat > update.json <<EOF
+          {
+              "*": {
+                  "version": "${{ steps.ver.outputs.version }}",
+                  "download_url": "https://github.com/${{ github.repository }}/releases/download/${{ steps.ver.outputs.tag }}/modpack-manager.zip"
+              }
+          }
+          EOF
+          cat update.json
 
       - name: Create / update release
         uses: softprops/action-gh-release@v2
@@ -51,4 +71,6 @@ jobs:
           name: ${{ steps.ver.outputs.tag }}
           generate_release_notes: true
           make_latest: true
-          files: modpack-manager.zip
+          files: |
+            modpack-manager.zip
+            update.json

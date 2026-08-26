@@ -1,4 +1,5 @@
 # Local/CI build artifacts
 /modpack-manager.zip
 /build/
+/update.json
 .DS_Store
