@@ -41,6 +41,24 @@ jobs:
             --exclude '*.zip' \
             --exclude 'update.json' \
             ./ build/modpack-manager/
+
+          # Stamp the outgoing User-Agent with the released version so CurseForge,
+          # Modrinth and FTB see an accurate one without it having to be hand-edited
+          # each release. Only our own `pelican-modpack-manager/<version>` token is
+          # rewritten: the version is replaced in place, so Modrinth's trailing
+          # "(contact)" suffix survives, and ATLauncher's deliberately browser-like
+          # UA is never matched. This edits the build copy only -- the committed
+          # source keeps whatever version it has.
+          VERSION="${{ steps.ver.outputs.version }}"
+          find build/modpack-manager/src -name '*.php' -print0 \
+            | xargs -0 sed -i -E "s#pelican-modpack-manager/[0-9][0-9A-Za-z._-]*#pelican-modpack-manager/${VERSION}#g"
+          echo "--- stamped user agents ---"
+          grep -rn "pelican-modpack-manager/" build/modpack-manager/src
+          if grep -rn "pelican-modpack-manager/" build/modpack-manager/src | grep -v "pelican-modpack-manager/${VERSION}"; then
+            echo "::error::A User-Agent listed above was left on a stale version"
+            exit 1
+          fi
+
           ( cd build && zip -r -q -X ../modpack-manager.zip modpack-manager -x '*.DS_Store' )
           echo "--- zip contents (top level) ---"
           unzip -l modpack-manager.zip | head -n 20
