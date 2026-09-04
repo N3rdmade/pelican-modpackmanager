@@ -982,15 +982,25 @@ class ModpackInstallService
         $filesFixed = 0;
         $directoriesFixed = 0;
         $checked = 0;
+        $repaired = [];
+        $failures = [];
+        $chmodState = [
+            'batch_size' => 16,
+            'disabled' => false,
+            'disabled_reason' => null,
+            'last_failure' => null,
+            'same_failures' => 0,
+        ];
 
         try {
             $rootEntries = $this->fileRepo->getDirectory('/');
         } catch (Throwable $e) {
-            throw new RuntimeException(
-                'Could not inspect extracted file permissions in /: ' . $e->getMessage(),
-                0,
-                $e
-            );
+            $record->appendLog('  WARNING: permission scan unavailable: ' . $e->getMessage());
+            Log::warning('[ModpackManager] Extracted permission scan unavailable', [
+                'record' => $record->id,
+                'error' => $e->getMessage(),
+            ]);
+            return;
         }
 
         $scanRoots = [];
@@ -1019,8 +1029,8 @@ class ModpackInstallService
             }
         }
 
-        $this->chmodPermissionPaths($rootDirectoriesToFix, '0755', $directoriesFixed);
-        $this->chmodPermissionPaths($rootFilesToFix, '0644', $filesFixed);
+        $this->chmodPermissionPaths($rootDirectoriesToFix, '0755', $directoriesFixed, $repaired, $failures, $chmodState);
+        $this->chmodPermissionPaths($rootFilesToFix, '0644', $filesFixed, $repaired, $failures, $chmodState);
 
         $totalRoots = count($scanRoots);
         if ($totalRoots > 0) {
@@ -1030,12 +1040,19 @@ class ModpackInstallService
         $reportEvery = max(1, (int) ceil(max(1, $totalRoots) / 5));
 
         foreach ($scanRoots as $index => $scanRoot) {
-            $directoryFixesBefore = $directoriesFixed;
+            $compatibilityScan = false;
 
-            try {
-                $entries = $this->fileRepo->search('*?*', $scanRoot);
-                if (!is_array($entries) || !array_is_list($entries)) {
-                    throw new RuntimeException('Wings returned an invalid recursive search response.');
+            do {
+                $directoriesFixedBeforePass = $directoriesFixed;
+
+                try {
+                    $entries = $this->fileRepo->search('*?*', $scanRoot);
+                    if (!is_array($entries) || !array_is_list($entries)) {
+                        throw new RuntimeException('Wings returned an invalid recursive search response.');
+                    }
+                } catch (Throwable) {
+                    $compatibilityScan = true;
+                    break;
                 }
 
                 $filesToFix = [];
@@ -1068,28 +1085,20 @@ class ModpackInstallService
                     }
                 }
 
-                $this->chmodPermissionPaths($directoriesToFix, '0755', $directoriesFixed);
-                $this->chmodPermissionPaths($filesToFix, '0644', $filesFixed);
+                $this->chmodPermissionPaths($directoriesToFix, '0755', $directoriesFixed, $repaired, $failures, $chmodState);
+                $this->chmodPermissionPaths($filesToFix, '0644', $filesFixed, $repaired, $failures, $chmodState);
+            } while ($directoriesFixed > $directoriesFixedBeforePass);
 
-                // If a broken directory was repaired, make one exhaustive pass through
-                // this subtree so entries hidden behind that directory are not missed.
-                if ($directoriesFixed > $directoryFixesBefore) {
-                    $this->repairPermissionsRecursively(
-                        $scanRoot,
-                        $filesFixed,
-                        $directoriesFixed,
-                        $checked
-                    );
-                }
-            } catch (Throwable $e) {
-                // Older Wings builds may not support the recursive search endpoint.
-                // Keep correctness by falling back only for this top-level subtree.
+            if ($compatibilityScan) {
                 $record->appendLog("    Fast permission scan unavailable for {$scanRoot}; using compatibility scan.");
                 $this->repairPermissionsRecursively(
                     $scanRoot,
                     $filesFixed,
                     $directoriesFixed,
-                    $checked
+                    $checked,
+                    $repaired,
+                    $failures,
+                    $chmodState
                 );
             }
 
@@ -1106,7 +1115,19 @@ class ModpackInstallService
                 . '.'
             );
         } else {
-            $record->appendLog("  Permission check complete: {$checked} entries checked; no unusable permissions found.");
+            $record->appendLog("  Permission check complete: {$checked} entries checked; no unusable permissions repaired.");
+        }
+
+        if ($failures !== []) {
+            $paths = array_keys($failures);
+            $preview = implode(', ', array_map(fn (string $path) => '/' . ltrim($path, '/'), array_slice($paths, 0, 3)));
+            $remaining = count($paths) - min(3, count($paths));
+            $suffix = $remaining > 0 ? " (+{$remaining} more)" : '';
+            $record->appendLog('  WARNING: Wings could not repair ' . count($paths) . " permission path(s): {$preview}{$suffix}. Continuing installation.");
+            Log::warning('[ModpackManager] Extracted permission repair incomplete', [
+                'record' => $record->id,
+                'failures' => $failures,
+            ]);
         }
     }
 
@@ -1114,16 +1135,17 @@ class ModpackInstallService
         string $directory,
         int &$filesFixed,
         int &$directoriesFixed,
-        int &$checked
+        int &$checked,
+        array &$repaired,
+        array &$failures,
+        array &$chmodState
     ): void {
         try {
             $entries = $this->fileRepo->getDirectory($directory);
         } catch (Throwable $e) {
-            throw new RuntimeException(
-                "Could not inspect extracted file permissions in {$directory}: " . $e->getMessage(),
-                0,
-                $e
-            );
+            $key = ltrim($directory, '/');
+            $failures[$key !== '' ? $key : '/'] = $e->getMessage();
+            return;
         }
 
         $filesToFix = [];
@@ -1141,19 +1163,10 @@ class ModpackInstallService
 
             if ($this->entryHasNoPermissions($entry)) {
                 if ($isDirectory) {
-                    try {
-                        $this->fileRepo->chmodFiles('/', [[
-                            'file' => $relativePath,
-                            'mode' => '0755',
-                        ]]);
-                    } catch (Throwable $e) {
-                        throw new RuntimeException(
-                            "Could not repair permissions on directory {$path}: " . $e->getMessage(),
-                            0,
-                            $e
-                        );
+                    $this->chmodPermissionPaths([$relativePath], '0755', $directoriesFixed, $repaired, $failures, $chmodState);
+                    if (!isset($repaired[$relativePath])) {
+                        continue;
                     }
-                    $directoriesFixed++;
                 } else {
                     $filesToFix[] = $relativePath;
                 }
@@ -1164,18 +1177,21 @@ class ModpackInstallService
                     $path,
                     $filesFixed,
                     $directoriesFixed,
-                    $checked
+                    $checked,
+                    $repaired,
+                    $failures,
+                    $chmodState
                 );
             }
 
-            if (count($filesToFix) >= 200) {
-                $this->chmodPermissionPaths($filesToFix, '0644', $filesFixed);
+            if (count($filesToFix) >= 256) {
+                $this->chmodPermissionPaths($filesToFix, '0644', $filesFixed, $repaired, $failures, $chmodState);
                 $filesToFix = [];
             }
         }
 
         if ($filesToFix !== []) {
-            $this->chmodPermissionPaths($filesToFix, '0644', $filesFixed);
+            $this->chmodPermissionPaths($filesToFix, '0644', $filesFixed, $repaired, $failures, $chmodState);
         }
     }
 
@@ -1190,35 +1206,145 @@ class ModpackInstallService
         return $mode === '----------' || $mode === 'd---------';
     }
 
-    /**
-     * @param array<int, string> $paths
-     */
-    private function chmodPermissionPaths(array $paths, string $mode, int &$fixed): void
-    {
-        foreach (array_chunk(array_values(array_unique($paths)), 200) as $chunk) {
-            if ($chunk === []) {
+    private function chmodPermissionPaths(
+        array $paths,
+        string $mode,
+        int &$fixed,
+        array &$repaired,
+        array &$failures,
+        array &$state
+    ): void {
+        $pending = [];
+
+        foreach ($paths as $path) {
+            $path = ltrim(str_replace('\\', '/', trim((string) $path)), '/');
+            if ($path === '' || isset($repaired[$path]) || isset($failures[$path])) {
                 continue;
             }
+            $pending[$path] = $path;
+        }
 
-            $files = array_map(
-                fn (string $path) => ['file' => ltrim($path, '/'), 'mode' => $mode],
-                $chunk
-            );
+        $pending = array_values($pending);
+        if ($pending === []) {
+            return;
+        }
+
+        if ((bool) ($state['disabled'] ?? false)) {
+            $reason = (string) ($state['disabled_reason'] ?? 'Wings chmod endpoint unavailable');
+            foreach ($pending as $path) {
+                $failures[$path] = $reason;
+            }
+            return;
+        }
+
+        while ($pending !== []) {
+            $batchSize = max(1, min(16, (int) ($state['batch_size'] ?? 16)));
+            $chunkSize = min($batchSize, count($pending));
+            $chunk = array_slice($pending, 0, $chunkSize);
 
             try {
-                $this->fileRepo->chmodFiles('/', $files);
+                $this->sendPermissionChmod($chunk, $mode);
+                foreach ($chunk as $path) {
+                    if (!isset($repaired[$path])) {
+                        $repaired[$path] = $mode;
+                        $fixed++;
+                    }
+                    unset($failures[$path]);
+                }
+                array_splice($pending, 0, $chunkSize);
+                $state['same_failures'] = 0;
+                $state['last_failure'] = null;
+                $state['batch_size'] = min(16, $batchSize * 2);
+                continue;
             } catch (Throwable $e) {
-                throw new RuntimeException(
-                    'Could not repair unusable extracted file permissions: ' . $e->getMessage(),
-                    0,
-                    $e
-                );
+                if ($chunkSize > 1 && $this->canRetryPermissionChmodSmaller($e)) {
+                    $state['batch_size'] = max(1, intdiv($chunkSize, 2));
+                    continue;
+                }
+
+                if (!$this->canRetryPermissionChmodSmaller($e)) {
+                    $reason = $e->getMessage();
+                    $state['disabled'] = true;
+                    $state['disabled_reason'] = $reason;
+                    foreach ($pending as $path) {
+                        $failures[$path] = $reason;
+                    }
+                    return;
+                }
             }
 
-            $fixed += count($chunk);
+            $path = $chunk[0];
+
+            try {
+                $this->sendPermissionChmod([$path], $mode);
+                if (!isset($repaired[$path])) {
+                    $repaired[$path] = $mode;
+                    $fixed++;
+                }
+                unset($failures[$path]);
+                array_shift($pending);
+                $state['same_failures'] = 0;
+                $state['last_failure'] = null;
+                $state['batch_size'] = min(16, max(2, $batchSize * 2));
+            } catch (Throwable $e) {
+                $reason = $e->getMessage();
+                $signature = $this->permissionChmodFailureSignature($e);
+                $failures[$path] = $reason;
+                array_shift($pending);
+
+                if (($state['last_failure'] ?? null) === $signature) {
+                    $state['same_failures'] = (int) ($state['same_failures'] ?? 0) + 1;
+                } else {
+                    $state['last_failure'] = $signature;
+                    $state['same_failures'] = 1;
+                }
+
+                $state['batch_size'] = 1;
+
+                if ((int) $state['same_failures'] >= 4) {
+                    $state['disabled'] = true;
+                    $state['disabled_reason'] = $reason;
+                    foreach ($pending as $remainingPath) {
+                        $failures[$remainingPath] = $reason;
+                    }
+                    return;
+                }
+            }
         }
     }
 
+    private function sendPermissionChmod(array $paths, string $mode): void
+    {
+        $files = array_map(
+            fn (string $path) => ['file' => ltrim($path, '/'), 'mode' => $mode],
+            $paths
+        );
+
+        $this->fileRepo->chmodFiles('/', $files);
+    }
+
+    private function canRetryPermissionChmodSmaller(Throwable $e): bool
+    {
+        if ($e instanceof \Illuminate\Http\Client\ConnectionException) {
+            return false;
+        }
+
+        if ($e instanceof \Illuminate\Http\Client\RequestException) {
+            return in_array($e->response->status(), [400, 409, 413, 422, 500], true);
+        }
+
+        return true;
+    }
+
+    private function permissionChmodFailureSignature(Throwable $e): string
+    {
+        $status = $e instanceof \Illuminate\Http\Client\RequestException
+            ? (string) $e->response->status()
+            : '';
+        $message = preg_replace('/\\s+/', ' ', trim($e->getMessage())) ?: get_class($e);
+
+        return get_class($e) . ':' . $status . ':' . $message;
+    }
     /**
      * When `store_metadata` is enabled, persist the installed-pack info into the
      * server's own files (a dotfile in the server root) so the Modpacks page can
